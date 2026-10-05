@@ -1,9 +1,24 @@
-# GameBox v4.0 — shadPS4 渲染修复增强补丁 v2 引擎 CI 云端构建
+# GameBox v4.0 — shadPS4 渲染修复增强补丁 v2 引擎 CI 云端构建（v2.1 修复版）
 #
 # 用法（详见包内「先看我-GitHub云编译三步搞定.txt」）：
 #   1. 把 .github / engine / build-engine 三个文件夹原样拖进一个 GitHub 仓库
 #   2. Actions 页面 → build-patched-engine → Run workflow（手动触发）
 #   3. 约 1~1.5 小时后在运行页 Artifacts 下载 shadPS4-415907b-patched-v2
+#
+# ─────────────────────────────────────────────────────────────────────
+# v2.1 修复（2026-10-05）：解决「patch does not apply」10 个文件全失败
+#
+# 根因（已 1:1 复现确认）：
+#   Windows runner 的 Git 默认 core.autocrlf=true，actions/checkout 检出仓库时
+#   会把 engine/patches/*.patch（纯文本）的 LF 行尾自动转换成 CRLF——补丁每一
+#   行末尾都多出一个 \r 字符，与源码（LF，来自 zip 原样解压）匹配时 10 个文件
+#   全部失配，git apply 全军覆没。补丁本身与源码是完全匹配的（Linux 验证通过）。
+#
+# 修复（三道防线，缺一不可但相互独立）：
+#   1) 检出后立即 git config --global core.autocrlf false（克隆子模块也用 LF）
+#   2) 应用前把补丁文件行尾规范回 LF（幂等操作，本来就是 LF 则原样不动）
+#   3) 用 --ignore-whitespace 应用——实测 LF/CRLF 四种组合全部通过
+# ─────────────────────────────────────────────────────────────────────
 #
 # v2 相比 v1 工作流的关键修正：
 #   - v1 误判"依赖已内置源码包"——实际 45 个 externals 子目录在 zip 里是空挂载点，
@@ -35,6 +50,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: 初始化 Git 行尾配置（v2.1 修复：关掉 autocrlf）
+        shell: bash
+        run: |
+          set -e
+          # Windows runner 的 Git 默认 core.autocrlf=true：检出/克隆时会把文本
+          # 文件的 LF 换成 CRLF。这会让补丁文件行尾被改坏（本次失败根因），
+          # 也会让克隆下来的 45 个子模块源码行尾与 Linux 验证环境不一致。
+          # 关掉它之后：补丁保持 LF、子模块克隆也是 LF，与本地验证环境一致。
+          git config --global core.autocrlf false
+          git config --global core.safecrlf false
+          echo "[OK] core.autocrlf 已关闭"
 
       - name: 检查文件结构
         shell: pwsh
@@ -73,14 +100,33 @@ jobs:
           if (-not (Test-Path 'src\shadps4-sifac4k-main\CMakeLists.txt')) { throw '解压后未找到 src\shadps4-sifac4k-main\CMakeLists.txt（源码包不完整）' }
           Write-Host '[OK] 源码解压完成'
 
-      - name: 应用渲染修复主补丁（v2：10 文件 611 行）
+      - name: 应用渲染修复主补丁（v2：10 文件 611 行，v2.1 防弹应用）
         shell: bash
         run: |
           set -e
+          apply_patch() {
+            local p="$1"
+            # Git Bash 下把 Windows 风格路径转成 Unix 风格（更保险）
+            command -v cygpath >/dev/null 2>&1 && p="$(cygpath -u "$p")"
+            # 防线一：把补丁行尾规范为 LF。
+            # Windows 检出时 autocrlf 可能把补丁的 LF 换成 CRLF（本次失败根因），
+            # sed 幂等：本来就是 LF 则原样不动。
+            if grep -q $'\r' "$p" 2>/dev/null; then
+              sed -i 's/\r$//' "$p"
+              echo "[FIX] 检测到 CRLF 行尾，已规范为 LF：$p"
+            fi
+            # 防线二：--ignore-whitespace 应用（LF/CRLF 任意组合实测全部通过）
+            if git apply --check --ignore-whitespace "$p"; then
+              git apply --ignore-whitespace "$p"
+              echo "[OK] 补丁已应用：$(basename "$p")"
+            else
+              echo "[失败] 补丁内容与源码不匹配（这不是行尾问题，请截图日志）：$p"
+              exit 1
+            fi
+          }
           cd src/shadps4-sifac4k-main
           git init -q 2>/dev/null || true
-          git apply --check "$GITHUB_WORKSPACE/engine/patches/shadps4-gamebox-v2-combined.patch"
-          git apply "$GITHUB_WORKSPACE/engine/patches/shadps4-gamebox-v2-combined.patch"
+          apply_patch "$GITHUB_WORKSPACE/engine/patches/shadps4-gamebox-v2-combined.patch"
           grep -q 'PM4CmdSetPredication' src/video_core/amdgpu/pm4_cmds.h
           grep -q 'V_LOG_CLAMP_F32' src/shader_recompiler/frontend/translate/translate.h
           grep -q 'db_format_actual' src/video_core/renderer_vulkan/vk_rasterizer.h
@@ -122,13 +168,28 @@ jobs:
           [ "$empty" -eq 0 ] || { echo "仍有 $empty 个空目录"; exit 1; }
           echo "[OK] 全部子模块恢复完成"
 
-      - name: 应用依赖构建补丁（ffmpeg SHA 覆盖 + IGFD 兼容）
+      - name: 应用依赖构建补丁（ffmpeg SHA 覆盖 + IGFD 兼容，v2.1 防弹应用）
         shell: bash
         run: |
           set -e
+          apply_patch() {
+            local p="$1"
+            command -v cygpath >/dev/null 2>&1 && p="$(cygpath -u "$p")"
+            if grep -q $'\r' "$p" 2>/dev/null; then
+              sed -i 's/\r$//' "$p"
+              echo "[FIX] 检测到 CRLF 行尾，已规范为 LF：$p"
+            fi
+            if git apply --check --ignore-whitespace "$p"; then
+              git apply --ignore-whitespace "$p"
+              echo "[OK] 补丁已应用：$(basename "$p")"
+            else
+              echo "[失败] 补丁内容与子模块代码不匹配（这不是行尾问题，请截图日志）：$p"
+              exit 1
+            fi
+          }
           cd src/shadps4-sifac4k-main
-          git apply "$GITHUB_WORKSPACE/engine/patches/ffmpeg-cmake-sha-override.patch"
-          git apply "$GITHUB_WORKSPACE/engine/patches/imguifiledialog-childflags-compat.patch"
+          apply_patch "$GITHUB_WORKSPACE/engine/patches/ffmpeg-cmake-sha-override.patch"
+          apply_patch "$GITHUB_WORKSPACE/engine/patches/imguifiledialog-childflags-compat.patch"
           echo "[OK] 依赖构建补丁应用成功"
 
       - name: 初始化 MSVC 编译环境
