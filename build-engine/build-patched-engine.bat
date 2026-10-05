@@ -56,13 +56,15 @@ if exist .patched-v2 (
     echo [OK] 补丁已应用，跳过
 ) else (
     echo 正在应用主补丁（10 文件 611 行）……
-    git apply --check "..\..\engine\patches\shadps4-gamebox-v2-combined.patch" || goto :fail_popd
-    git apply "..\..\engine\patches\shadps4-gamebox-v2-combined.patch" || goto :fail_popd
+    rem v2.1: --ignore-whitespace 防止克隆文件 CRLF 行尾导致 patch does not apply
+    git apply --check --ignore-whitespace "..\..\engine\patches\shadps4-gamebox-v2-combined.patch" || goto :fail_popd
+    git apply --ignore-whitespace "..\..\engine\patches\shadps4-gamebox-v2-combined.patch" || goto :fail_popd
     echo 正在恢复依赖目录（从 GitHub 克隆 45+4 个库，首次约 5-10 分钟）……
     powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0restore-submodules.ps1" -SourceDir . || goto :fail_popd
     echo 正在应用依赖构建补丁（ffmpeg SHA 覆盖 + IGFD 兼容）……
-    git apply "..\..\engine\patches\ffmpeg-cmake-sha-override.patch" || goto :fail_popd
-    git apply "..\..\engine\patches\imguifiledialog-childflags-compat.patch" || goto :fail_popd
+    rem v2.1: 子模块克隆文件在 Windows 上是 CRLF 行尾，必须加 --ignore-whitespace
+    git apply --ignore-whitespace "..\..\engine\patches\ffmpeg-cmake-sha-override.patch" || goto :fail_popd
+    git apply --ignore-whitespace "..\..\engine\patches\imguifiledialog-childflags-compat.patch" || goto :fail_popd
     echo ok > .patched-v2
 )
 echo [OK] 补丁全部就绪
