@@ -1,4 +1,4 @@
-# GameBox v4.0 — shadPS4 渲染修复增强补丁 v2 引擎 CI 云端构建（v2.1 修复版）
+# GameBox v4.0 — shadPS4 渲染修复增强补丁 v2 引擎 CI 云端构建（v2.2 修复版）
 #
 # 用法（详见包内「先看我-GitHub云编译三步搞定.txt」）：
 #   1. 把 .github / engine / build-engine 三个文件夹原样拖进一个 GitHub 仓库
@@ -6,7 +6,21 @@
 #   3. 约 1~1.5 小时后在运行页 Artifacts 下载 shadPS4-415907b-patched-v2
 #
 # ─────────────────────────────────────────────────────────────────────
-# v2.1 修复（2026-10-05）：解决「patch does not apply」10 个文件全失败
+# v2.2 修复（2026-10-05 第二次）：「恢复子模块」步骤静默退出（exit 1 无报错）
+#
+# 根因（已 1:1 复现确认）：
+#   45 个子模块 + 4 个嵌套依赖全部克隆成功后，空目录检查那一行：
+#     empty=$(for d in externals/*/; do [ -z "..." ] && echo "$d"; done | wc -l)
+#   在 set -e + pipefail 下会静默自杀——[ -z ... ] && echo 的失败返回值经
+#   管道(pipefail) → 命令替换 → set -e 三级连锁，脚本无声死掉，
+#   什么都不打印（实测 1:1 复现，退出码 1、零输出）。
+#   实际上 49 个目录全部有内容（aacdec/cmake-modules/gcn/renderdoc/stb
+#   是 zip 内自带内容而非子模块），检查本来就应该通过。
+#
+# 修复：改用防弹写法（if 计数器，无管道/无命令替换/无 && 陷阱），
+#   并把克隆失败、标记缺失等所有失败点都改成「大声报错」。
+# ─────────────────────────────────────────────────────────────────────
+# v2.1 修复（2026-10-05 第一次）：解决「patch does not apply」10 个文件全失败
 #
 # 根因（已 1:1 复现确认）：
 #   Windows runner 的 Git 默认 core.autocrlf=true，actions/checkout 检出仓库时
@@ -127,12 +141,13 @@ jobs:
           cd src/shadps4-sifac4k-main
           git init -q 2>/dev/null || true
           apply_patch "$GITHUB_WORKSPACE/engine/patches/shadps4-gamebox-v2-combined.patch"
-          grep -q 'PM4CmdSetPredication' src/video_core/amdgpu/pm4_cmds.h
-          grep -q 'V_LOG_CLAMP_F32' src/shader_recompiler/frontend/translate/translate.h
-          grep -q 'db_format_actual' src/video_core/renderer_vulkan/vk_rasterizer.h
+          # v2.2: 标记检查改为大声报错（原来静默死）
+          grep -q 'PM4CmdSetPredication' src/video_core/amdgpu/pm4_cmds.h || { echo '[失败] 标记缺失: PM4CmdSetPredication'; exit 1; }
+          grep -q 'V_LOG_CLAMP_F32' src/shader_recompiler/frontend/translate/translate.h || { echo '[失败] 标记缺失: V_LOG_CLAMP_F32'; exit 1; }
+          grep -q 'db_format_actual' src/video_core/renderer_vulkan/vk_rasterizer.h || { echo '[失败] 标记缺失: db_format_actual'; exit 1; }
           echo "[OK] 主补丁应用成功（条件渲染 + 流式输出 + D16S8 深度补偿 + clamp 纹理 + 着色器 clamp 指令）"
 
-      - name: 恢复子模块（45 个外部依赖 + 4 个嵌套依赖）
+      - name: 恢复子模块（45 个外部依赖 + 4 个嵌套依赖，v2.2 防弹版）
         shell: bash
         run: |
           set -e
@@ -144,28 +159,49 @@ jobs:
             path=$(git config -f .gitmodules --get "submodule.${name}.path")
             url=$(git config -f .gitmodules --get "submodule.${name}.url")
             branch=$(git config -f .gitmodules --get "submodule.${name}.branch" 2>/dev/null || true)
-            [ -d "$path" ] && [ -n "$(ls -A "$path" 2>/dev/null)" ] && { echo "SKIP: $path"; return 0; }
+            if [ -d "$path" ] && [ -n "$(ls -A "$path" 2>/dev/null)" ]; then echo "SKIP: $path"; return 0; fi
+            # v2.2: 克隆失败大声报错（原来被 -q 吞掉，只留静默死）
             if [ -n "$branch" ]; then
-              git clone -q --depth 1 --single-branch --branch "$branch" "$url" "$path"
+              git clone -q --depth 1 --single-branch --branch "$branch" "$url" "$path" \
+                || { echo "[失败] 克隆失败（分支 $branch）：$url"; return 1; }
             else
-              git clone -q --depth 1 "$url" "$path"
+              git clone -q --depth 1 "$url" "$path" \
+                || { echo "[失败] 克隆失败：$url"; return 1; }
             fi
             echo "OK: $path"
           }
           export -f restore_one
-          printf '%s\n' "${NAMES[@]}" | xargs -P 8 -I{} bash -c 'restore_one "$@"' _ {}
+          # v2.2: 管道失败大声报错
+          printf '%s\n' "${NAMES[@]}" | xargs -P 8 -I{} bash -c 'restore_one "$@"' _ {} || {
+            echo '[失败] 有子模块克隆失败（看上方 [失败] 行）；网络抖动直接重跑即可'
+            exit 1
+          }
           # 嵌套子依赖（zip 树不带 gitlink，需显式恢复；toml11 的 tests/docs 依赖构建不需要，跳过）
           clone_nested() {
             local path="$1" url="$2"
             if [ -d "$path" ] && [ -n "$(ls -A "$path" 2>/dev/null)" ]; then echo "SKIP: $path"; return 0; fi
-            git clone -q --depth 1 "$url" "$path" && echo "OK(嵌套): $path"
+            # v2.2: a && b || c 写法，失败大声报错
+            git clone -q --depth 1 "$url" "$path" && echo "OK(嵌套): $path" \
+              || { echo "[失败] 嵌套克隆失败：$url"; exit 1; }
           }
           clone_nested externals/zydis/dependencies/zycore https://github.com/zyantific/zycore-c.git
           clone_nested externals/sirit/externals/SPIRV-Headers https://github.com/KhronosGroup/SPIRV-Headers.git
           clone_nested externals/freetype/subprojects/dlg https://github.com/nyorain/dlg.git
           clone_nested externals/discord-rpc/thirdparty/rapidjson https://github.com/Tencent/rapidjson.git
-          empty=$(for d in externals/*/; do [ -z "$(ls -A "$d" 2>/dev/null)" ] && echo "$d"; done | wc -l)
-          [ "$empty" -eq 0 ] || { echo "仍有 $empty 个空目录"; exit 1; }
+          # v2.2 修复（本次失败根因）：原来的空目录检查写法在 set -e + pipefail
+          # 下会静默自杀——[ -z ... ] && echo 的返回值经 管道(pipefail) → 命令替换
+          # → set -e 三级连锁触发，脚本无声死掉。改用 if 计数器防弹写法：
+          empty=0
+          for d in externals/*/; do
+            if [ -z "$(ls -A "$d" 2>/dev/null)" ]; then
+              empty=$((empty+1))
+              echo "[警告] 空目录: $d"
+            fi
+          done
+          if [ "$empty" -gt 0 ]; then
+            echo "[失败] 仍有 $empty 个空目录（见上方警告行）"
+            exit 1
+          fi
           echo "[OK] 全部子模块恢复完成"
 
       - name: 应用依赖构建补丁（ffmpeg SHA 覆盖 + IGFD 兼容，v2.1 防弹应用）
