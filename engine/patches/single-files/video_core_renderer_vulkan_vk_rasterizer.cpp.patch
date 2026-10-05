@@ -1,0 +1,160 @@
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index 6fc0aff..4ea438b 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -142,8 +142,13 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
+         image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
+         auto& image = texture_cache.GetImage(image_id);
+         image.binding.is_target = 1u;
++        // Remember the format of the backing image actually allocated. It can
++        // differ from the guest-requested one after host fallback resolution
++        // (e.g. Z16+Stencil8 -> D24UnormS8Uint on NVIDIA GPUs).
++        db_format_actual = image.backing->image.image_ci.format;
+     } else {
+         db_desc.first = {};
++        db_format_actual = vk::Format::eUndefined;
+     }
+ }
+ 
+@@ -214,13 +219,36 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
+ 
+     pipeline->BindResources(set_writes, buffer_barriers, push_data);
+     UpdateDynamicState(pipeline, is_indexed);
++
++    // Emulated CP predication (IT_SET_PREDICATION) via conditional rendering.
++    // Conditional rendering blocks must wrap the render pass instance, so any
++    // previously open pass is closed first and the pass opened below is closed
++    // again before the block ends.
++    const auto& predication = liverpool->predication;
++    const bool use_conditional_rendering =
++        predication.enabled && instance.IsConditionalRenderingSupported();
++
++    const auto cmdbuf = scheduler.CommandBuffer();
++    vk::ConditionalRenderingBeginInfoEXT conditional_rendering_info{};
++    if (use_conditional_rendering) {
++        scheduler.EndRendering();
++        auto [predicate_buffer, predicate_offset] =
++            buffer_cache.ObtainBuffer(predication.address,
++                                      predication.bool64 ? sizeof(u64) : sizeof(u32), false);
++        conditional_rendering_info.buffer = predicate_buffer->Handle();
++        conditional_rendering_info.offset = predicate_offset;
++        if (predication.inverted) {
++            conditional_rendering_info.flags = vk::ConditionalRenderingFlagBitsEXT::eInverted;
++        }
++        cmdbuf.beginConditionalRenderingEXT(conditional_rendering_info);
++    }
++
+     scheduler.BeginRendering(state);
+ 
+     const auto& vs_info = pipeline->GetStage(Shader::LogicalStage::Vertex);
+     const auto& fetch_shader = pipeline->GetFetchShader();
+     const auto [vertex_offset, instance_offset] = GetDrawOffsets(regs, vs_info, fetch_shader);
+ 
+-    const auto cmdbuf = scheduler.CommandBuffer();
+     cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
+ 
+     if (is_indexed) {
+@@ -230,6 +258,12 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
+         cmdbuf.draw(regs.num_indices, regs.num_instances.NumInstances(), vertex_offset,
+                     instance_offset);
+     }
++
++    if (use_conditional_rendering) {
++        scheduler.EndRendering();
++        cmdbuf.endConditionalRenderingEXT();
++    }
++
+     DebugState.IncDrawCall();
+ 
+     ResetBindings();
+@@ -283,12 +317,33 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
+ 
+     pipeline->BindResources(set_writes, buffer_barriers, push_data);
+     UpdateDynamicState(pipeline, is_indexed);
++
++    // Emulated CP predication (IT_SET_PREDICATION) via conditional rendering,
++    // identical to the direct draw path. The block wraps the render pass.
++    const auto& predication = liverpool->predication;
++    const bool use_conditional_rendering =
++        predication.enabled && instance.IsConditionalRenderingSupported();
++
++    const auto cmdbuf = scheduler.CommandBuffer();
++    vk::ConditionalRenderingBeginInfoEXT conditional_rendering_info{};
++    if (use_conditional_rendering) {
++        scheduler.EndRendering();
++        auto [predicate_buffer, predicate_offset] =
++            buffer_cache.ObtainBuffer(predication.address,
++                                      predication.bool64 ? sizeof(u64) : sizeof(u32), false);
++        conditional_rendering_info.buffer = predicate_buffer->Handle();
++        conditional_rendering_info.offset = predicate_offset;
++        if (predication.inverted) {
++            conditional_rendering_info.flags = vk::ConditionalRenderingFlagBitsEXT::eInverted;
++        }
++        cmdbuf.beginConditionalRenderingEXT(conditional_rendering_info);
++    }
++
+     scheduler.BeginRendering(state);
+ 
+     // We can safely ignore both SGPR UD indices and results of fetch shader parsing, as vertex and
+     // instance offsets will be automatically applied by Vulkan from indirect args buffer.
+ 
+-    const auto cmdbuf = scheduler.CommandBuffer();
+     cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
+ 
+     if (is_indexed) {
+@@ -313,6 +368,11 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
+         DebugState.IncDrawCall();
+     }
+ 
++    if (use_conditional_rendering) {
++        scheduler.EndRendering();
++        cmdbuf.endConditionalRenderingEXT();
++    }
++
+     ResetBindings();
+ }
+ 
+@@ -1304,9 +1364,41 @@ void Rasterizer::UpdateDepthStencilState() const {
+     dynamic_state.SetDepthBiasEnabled(depth_bias_enabled);
+     if (depth_bias_enabled) {
+         const bool front = regs.polygon_control.enable_polygon_offset_front;
++        float depth_bias_offset =
++            front ? regs.poly_offset.front_offset : regs.poly_offset.back_offset;
++        // Depth-bias units in Vulkan are multiples of the bound depth format's
++        // minimum representable value. Games tune the offset for the format
++        // they programmed (Z16 -> 1/65535 per unit). When the host silently
++        // falls back to a deeper format (D16S8 is unsupported on NVIDIA and
++        // becomes D24S8, i.e. 1/16777215 per unit), the same offset shifts the
++        // geometry by only 1/256 of the intended depth, causing z-fighting,
++        // shadow acne and decals flickering. Rescale by the ratio of minimum
++        // representable values to keep the effective depth displacement.
++        // Note: GCN has no Z24 mode, so a D24UnormS8Uint backing can only
++        // originate from the Z16 fallback path, never from a guest request.
++        static bool s_d16s8_fallback_logged = false;
++        const bool guest_requested_d16 =
++            regs.depth_buffer.z_info.format == AmdGpu::DepthBuffer::ZFormat::Z16;
++        if (guest_requested_d16 && db_format_actual == vk::Format::eD24UnormS8Uint) {
++            depth_bias_offset *= 256.0f; // 2^24 / 2^16
++            if (!s_d16s8_fallback_logged) {
++                s_d16s8_fallback_logged = true;
++                LOG_INFO(Render_Vulkan,
++                         "D16S8 depth format fallback (D24S8) detected: depth-bias units "
++                         "rescaled by 256x to preserve polygon offset geometry");
++            }
++        } else if (guest_requested_d16 &&
++                   db_format_actual == vk::Format::eD32SfloatS8Uint) {
++            if (!s_d16s8_fallback_logged) {
++                s_d16s8_fallback_logged = true;
++                LOG_INFO(Render_Vulkan,
++                         "D16S8 depth format fallback (D32SfloatS8) detected: depth-bias unit "
++                         "mapping is implementation-defined for float formats, offset kept "
++                         "unscaled");
++            }
++        }
+         dynamic_state.SetDepthBias(
+-            front ? regs.poly_offset.front_offset : regs.poly_offset.back_offset,
+-            regs.poly_offset.depth_bias,
++            depth_bias_offset, regs.poly_offset.depth_bias,
+             (front ? regs.poly_offset.front_scale : regs.poly_offset.back_scale) / 16.f);
+     }
+ 

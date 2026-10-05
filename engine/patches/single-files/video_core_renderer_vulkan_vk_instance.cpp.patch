@@ -1,0 +1,71 @@
+diff --git a/src/video_core/renderer_vulkan/vk_instance.cpp b/src/video_core/renderer_vulkan/vk_instance.cpp
+index 0af5dbe..19aa0b3 100644
+--- a/src/video_core/renderer_vulkan/vk_instance.cpp
++++ b/src/video_core/renderer_vulkan/vk_instance.cpp
+@@ -203,7 +203,8 @@ bool Instance::CreateDevice() {
+                           vk::PhysicalDevicePrimitiveTopologyListRestartFeaturesEXT,
+                           vk::PhysicalDeviceShaderAtomicFloat2FeaturesEXT,
+                           vk::PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR,
+-                          vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT>();
++                          vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT,
++                          vk::PhysicalDeviceConditionalRenderingFeaturesEXT>();
+     features = feature_chain.get().features;
+ 
+     const vk::StructureChain properties_chain = physical_device.getProperties2<
+@@ -276,6 +277,20 @@ bool Instance::CreateDevice() {
+                  dynamic_state_3_features.extendedDynamicState3ColorWriteMask);
+     }
+     custom_border_color = add_extension(VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
++    conditional_rendering = add_extension(VK_EXT_CONDITIONAL_RENDERING_EXTENSION_NAME);
++    if (conditional_rendering) {
++        const auto conditional_rendering_features =
++            feature_chain.get<vk::PhysicalDeviceConditionalRenderingFeaturesEXT>();
++        if (!conditional_rendering_features.conditionalRendering) {
++            // Extension is advertised but the feature bit is off; drop the extension
++            // so the device feature chain stays valid.
++            conditional_rendering = false;
++            enabled_extensions.pop_back();
++            LOG_WARNING(Render_Vulkan,
++                        "VK_EXT_conditional_rendering advertised without the "
++                        "conditionalRendering feature; predication will be ignored.");
++        }
++    }
+     depth_clip_control = add_extension(VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME);
+     depth_clip_enable = add_extension(VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME);
+     vertex_input_dynamic_state = add_extension(VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
+@@ -434,6 +449,9 @@ bool Instance::CreateDevice() {
+             .maintenance4 = vk13_features.maintenance4,
+         },
+         // Extensions
++        vk::PhysicalDeviceConditionalRenderingFeaturesEXT{
++            .conditionalRendering = conditional_rendering,
++        },
+         vk::PhysicalDeviceCustomBorderColorFeaturesEXT{
+             .customBorderColors = true,
+             .customBorderColorWithoutFormat = true,
+@@ -775,7 +793,16 @@ vk::Format Instance::GetSupportedFormat(const vk::Format format,
+                                         const vk::FormatFeatureFlags2 flags) const {
+     if (!IsFormatSupported(format, flags)) [[unlikely]] {
+         switch (format) {
+-        case vk::Format::eD16UnormS8Uint:
++        case vk::Format::eD16UnormS8Uint: {
++            // Common on NVIDIA (no D16S8 support at all) and old Intel. The
++            // rasterizer depth-bias compensation relies on this fallback path.
++            static bool s_d16s8_fallback_logged = false;
++            if (!s_d16s8_fallback_logged) {
++                s_d16s8_fallback_logged = true;
++                LOG_INFO(Render_Vulkan,
++                         "Format D16UnormS8Uint unsupported with required features: falling "
++                         "back to a host-supported depth-stencil format");
++            }
+             if (IsFormatSupported(vk::Format::eD24UnormS8Uint, flags)) {
+                 return vk::Format::eD24UnormS8Uint;
+             }
+@@ -783,6 +810,7 @@ vk::Format Instance::GetSupportedFormat(const vk::Format format,
+                 return vk::Format::eD32SfloatS8Uint;
+             }
+             break;
++        }
+         case vk::Format::eR8Srgb:
+             if (IsFormatSupported(vk::Format::eR8Unorm, flags)) {
+                 return vk::Format::eR8Unorm;

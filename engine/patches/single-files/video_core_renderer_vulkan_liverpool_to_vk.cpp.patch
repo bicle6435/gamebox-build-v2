@@ -1,0 +1,53 @@
+diff --git a/src/video_core/renderer_vulkan/liverpool_to_vk.cpp b/src/video_core/renderer_vulkan/liverpool_to_vk.cpp
+index 61c858f..8d85beb 100644
+--- a/src/video_core/renderer_vulkan/liverpool_to_vk.cpp
++++ b/src/video_core/renderer_vulkan/liverpool_to_vk.cpp
+@@ -7,6 +7,7 @@
+ #include "video_core/renderer_vulkan/liverpool_to_vk.h"
+ 
+ #include <magic_enum/magic_enum.hpp>
++#include <array>
+ 
+ #define INVALID_NUMBER_FORMAT_COMBO                                                                \
+     LOG_ERROR(Render_Vulkan, "Unsupported number type {} for format {}", number_type, format);
+@@ -301,6 +302,13 @@ vk::LogicOp LogicOp(AmdGpu::ColorControl::LogicOp logic_op) {
+ 
+ // https://github.com/chaotic-cx/mesa-mirror/blob/0954afff5/src/amd/vulkan/radv_sampler.c#L21
+ vk::SamplerAddressMode ClampMode(AmdGpu::ClampMode mode) {
++    // Mirror-once variants with a border component have no Vulkan equivalent
++    // (there is no VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_BORDER).
++    // eMirrorClampToEdge is the closest approximation and is what every major
++    // emulator uses; the residual difference only shows when the border color
++    // deliberately differs from the texture edge. Log each distinct mode once
++    // to keep the log usable instead of spamming on every sampler creation.
++    static std::array<bool, 8> s_clamp_approx_logged{};
+     switch (mode) {
+     case AmdGpu::ClampMode::Wrap:
+         return vk::SamplerAddressMode::eRepeat;
+@@ -310,14 +318,22 @@ vk::SamplerAddressMode ClampMode(AmdGpu::ClampMode mode) {
+         return vk::SamplerAddressMode::eClampToEdge;
+     case AmdGpu::ClampMode::MirrorOnceHalfBorder:
+     case AmdGpu::ClampMode::MirrorOnceBorder:
+-        LOG_WARNING(Render_Vulkan, "Unimplemented clamp mode {}, using closest equivalent.",
+-                    static_cast<u32>(mode));
++        if (!s_clamp_approx_logged[static_cast<size_t>(mode)]) {
++            s_clamp_approx_logged[static_cast<size_t>(mode)] = true;
++            LOG_WARNING(Render_Vulkan,
++                        "Clamp mode {} has no Vulkan mirror-clamp-to-border equivalent, "
++                        "approximating with mirror-clamp-to-edge (border color ignored)",
++                        static_cast<u32>(mode));
++        }
+         [[fallthrough]];
+     case AmdGpu::ClampMode::MirrorOnceLastTexel:
+         return vk::SamplerAddressMode::eMirrorClampToEdge;
+     case AmdGpu::ClampMode::ClampHalfBorder:
+-        LOG_WARNING(Render_Vulkan, "Unimplemented clamp mode {}, using closest equivalent.",
+-                    static_cast<u32>(mode));
++        if (!s_clamp_approx_logged[static_cast<size_t>(mode)]) {
++            s_clamp_approx_logged[static_cast<size_t>(mode)] = true;
++            LOG_WARNING(Render_Vulkan,
++                        "Clamp mode {} approximated with clamp-to-border", static_cast<u32>(mode));
++        }
+         [[fallthrough]];
+     case AmdGpu::ClampMode::ClampBorder:
+         return vk::SamplerAddressMode::eClampToBorder;

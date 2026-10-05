@@ -1,0 +1,17 @@
+diff --git a/src/shader_recompiler/frontend/translate/translate.h b/src/shader_recompiler/frontend/translate/translate.h
+index 1eea047..01f0ee1 100644
+--- a/src/shader_recompiler/frontend/translate/translate.h
++++ b/src/shader_recompiler/frontend/translate/translate.h
+@@ -218,7 +218,12 @@ public:
+     void V_FLOOR_F32(const GcnInst& inst);
+     void V_EXP_F32(const GcnInst& inst);
+     void V_LOG_F32(const GcnInst& inst);
++    void V_LOG_CLAMP_F32(const GcnInst& inst);
+     void V_RCP_F32(const GcnInst& inst);
++    void V_RCP_CLAMP_F32(const GcnInst& inst);
++    void V_RCP_CLAMP_F64(const GcnInst& inst);
++    void V_RSQ_CLAMP_F32(const GcnInst& inst);
++    void V_RSQ_CLAMP_F64(const GcnInst& inst);
+     void V_RCP_LEGACY_F32(const GcnInst& inst);
+     void V_RCP_F64(const GcnInst& inst);
+     void V_RSQ_F32(const GcnInst& inst);

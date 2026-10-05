@@ -1,0 +1,32 @@
+diff --git a/src/video_core/amdgpu/liverpool.h b/src/video_core/amdgpu/liverpool.h
+index 249ea2b..cd4d44b 100644
+--- a/src/video_core/amdgpu/liverpool.h
++++ b/src/video_core/amdgpu/liverpool.h
+@@ -63,6 +63,27 @@ struct Liverpool {
+     std::array<CbDbExtent, NUM_COLOR_BUFFERS> last_cb_extent{};
+     CbDbExtent last_db_extent{};
+ 
++    /**
++     * @brief CP predication state, set by IT_SET_PREDICATION.
++     *
++     * When enabled, subsequent rendering commands are discarded by the host
++     * via VK_EXT_conditional_rendering unless the predicate value at
++     * `address` satisfies `inverted` (see PM4CmdSetPredication).
++     */
++    struct PredicationState {
++        bool enabled{};
++        bool inverted{}; ///< true: draw when value == 0
++        bool bool64{};   ///< true: 64-bit predicate
++        VAddr address{};
++    } predication{};
++
++    /**
++     * @brief Vertex count of the most recent graphics draw, captured so that
++     *        IT_STRMOUT_BUFFER_UPDATE can report a plausible filled size for
++     *        games that perform CPU-side visibility readback.
++     */
++    u32 last_draw_num_vertices{};
++
+ public:
+     explicit Liverpool();
+     ~Liverpool();

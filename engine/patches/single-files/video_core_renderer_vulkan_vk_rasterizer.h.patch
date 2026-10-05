@@ -1,0 +1,18 @@
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.h b/src/video_core/renderer_vulkan/vk_rasterizer.h
+index 4165883..e2334cf 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.h
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.h
+@@ -132,6 +132,13 @@ private:
+     using RenderTargetInfo = std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc>;
+     std::array<RenderTargetInfo, AmdGpu::NUM_COLOR_BUFFERS> cb_descs;
+     std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc> db_desc;
++    // Vulkan format actually used for the bound depth-stencil backing image.
++    // It may differ from the guest-requested format when the host GPU lacks
++    // support (e.g. D16UnormS8Uint is universally unsupported on NVIDIA, the
++    // engine silently falls back to D24UnormS8Uint). UpdateDepthStencilState
++    // reads this to rescale depth-bias units, which per the Vulkan spec are
++    // multiples of the format's minimum representable depth value.
++    vk::Format db_format_actual{vk::Format::eUndefined};
+     boost::container::static_vector<vk::DescriptorImageInfo, Shader::NUM_IMAGES> image_infos;
+     boost::container::static_vector<vk::DescriptorBufferInfo, Shader::NUM_BUFFERS> buffer_infos;
+     boost::container::static_vector<VideoCore::ImageId, Shader::NUM_IMAGES> bound_images;

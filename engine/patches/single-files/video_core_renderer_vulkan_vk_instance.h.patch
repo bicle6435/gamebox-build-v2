@@ -1,0 +1,24 @@
+diff --git a/src/video_core/renderer_vulkan/vk_instance.h b/src/video_core/renderer_vulkan/vk_instance.h
+index 21f2cbd..a094970 100644
+--- a/src/video_core/renderer_vulkan/vk_instance.h
++++ b/src/video_core/renderer_vulkan/vk_instance.h
+@@ -124,6 +124,11 @@ public:
+         return attachment_feedback_loop;
+     }
+ 
++    /// Returns true when VK_EXT_conditional_rendering is supported and enabled
++    bool IsConditionalRenderingSupported() const {
++        return conditional_rendering;
++    }
++
+     /// Returns true when VK_EXT_custom_border_color is supported
+     bool IsCustomBorderColorSupported() const {
+         return custom_border_color;
+@@ -492,6 +497,7 @@ private:
+     TracyVkCtx profiler_context{};
+     u32 queue_family_index{0};
+     bool custom_border_color{};
++    bool conditional_rendering{};
+     bool fragment_shader_barycentric{};
+     bool amd_shader_explicit_vertex_parameter{};
+     bool depth_clip_control{};

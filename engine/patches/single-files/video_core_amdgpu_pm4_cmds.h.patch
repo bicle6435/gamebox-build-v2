@@ -1,0 +1,39 @@
+diff --git a/src/video_core/amdgpu/pm4_cmds.h b/src/video_core/amdgpu/pm4_cmds.h
+index abf58ad..c714d69 100644
+--- a/src/video_core/amdgpu/pm4_cmds.h
++++ b/src/video_core/amdgpu/pm4_cmds.h
+@@ -286,6 +286,34 @@ struct PM4CmdStrmoutBufferUpdate {
+     }
+ };
+ 
++/**
++ * @brief IT_SET_PREDICATION (PM4 type-3 opcode 0x20)
++ *
++ * Sets the predication address used by the CP to conditionally discard
++ * subsequent rendering commands. The 32-bit (or 64-bit when bool64 is set)
++ * value at the given GPU address acts as the predicate: drawing continues
++ * while the predicate satisfies `op`.
++ *   - op = 0 : draw when value != 0 (occlusion query visible)
++ *   - op = 1 : draw when value == 0 (inverted condition)
++ * An address of 0 disables predication.
++ */
++struct PM4CmdSetPredication {
++    PM4Type3Header header;
++    union {
++        BitField<0, 1, u32> op;     ///< 0: pass when value != 0; 1: pass when value == 0
++        BitField<1, 1, u32> bool64; ///< 1: compare 64-bit value, 0: compare 32-bit
++        u32 control;
++    };
++    u32 address_lo;
++    u32 address_hi;
++
++    template <typename T = u64>
++    T Address() const {
++        return reinterpret_cast<T>(address_lo | u64(address_hi & 0xFFFF) << 32);
++    }
++};
++static_assert(sizeof(PM4CmdSetPredication) == 16); // header(4) + control + addr_lo + addr_hi
++
+ struct PM4CmdDrawIndexOffset2 {
+     PM4Type3Header header;
+     u32 max_size;       ///< Maximum number of indices

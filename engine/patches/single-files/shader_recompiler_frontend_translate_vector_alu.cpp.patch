@@ -1,0 +1,100 @@
+diff --git a/src/shader_recompiler/frontend/translate/vector_alu.cpp b/src/shader_recompiler/frontend/translate/vector_alu.cpp
+index 5fc7dcf..e742975 100644
+--- a/src/shader_recompiler/frontend/translate/vector_alu.cpp
++++ b/src/shader_recompiler/frontend/translate/vector_alu.cpp
+@@ -167,7 +167,9 @@ void Translator::EmitVectorAlu(const GcnInst& inst) {
+     case Opcode::V_EXP_F32:
+         return V_EXP_F32(inst);
+     case Opcode::V_LOG_CLAMP_F32:
+-        return V_LOG_F32(inst);
++        // GCN clamped variant: dst = log2(clamp(src, 2^-126, 2^127)). The clamp
++        // guards against log(0) = -inf and log(neg) = NaN propagation.
++        return V_LOG_CLAMP_F32(inst);
+     case Opcode::V_LOG_F32:
+         return V_LOG_F32(inst);
+     case Opcode::V_RCP_F32:
+@@ -176,12 +178,22 @@ void Translator::EmitVectorAlu(const GcnInst& inst) {
+         return V_RCP_LEGACY_F32(inst);
+     case Opcode::V_RCP_F64:
+         return V_RCP_F64(inst);
++    // GCN clamped F64 variants were previously missing entirely (LogMissingOpcode
++    // left the destination register stale, corrupting downstream computation).
++    case Opcode::V_RCP_CLAMP_F64:
++        return V_RCP_CLAMP_F64(inst);
++    case Opcode::V_RSQ_CLAMP_F64:
++        return V_RSQ_CLAMP_F64(inst);
+     case Opcode::V_RCP_IFLAG_F32:
+         return V_RCP_F32(inst);
+     case Opcode::V_RCP_CLAMP_F32:
+-        return V_RCP_F32(inst);
++        // GCN clamped variant: dst = clamp(1/x, -FLT_MAX, FLT_MAX). Prevents
++        // inf propagation when x is zero or denormal (HDR tonemap, light decay).
++        return V_RCP_CLAMP_F32(inst);
+     case Opcode::V_RSQ_CLAMP_F32:
+-        return V_RSQ_F32(inst);
++        // GCN clamped variant: dst = clamp(sqrt(1/x), -FLT_MAX, FLT_MAX).
++        // Prevents inf/NaN propagation for out-of-range inputs (normalization).
++        return V_RSQ_CLAMP_F32(inst);
+     case Opcode::V_RSQ_LEGACY_F32:
+         return V_RSQ_F32(inst);
+     case Opcode::V_RSQ_F32:
+@@ -1028,6 +1040,59 @@ void Translator::V_LOG_F32(const GcnInst& inst) {
+     SetDst(inst.dst[0], ir.FPLog2(src0));
+ }
+ 
++void Translator::V_LOG_CLAMP_F32(const GcnInst& inst) {
++    // D = log2(clamp(S0, 2^-126, 2^127))  [GCN ISA: V_LOG_CLAMP_F32]
++    // The hardware clamp keeps the operand inside the positive normal range so
++    // that the result never becomes -inf (S0 == 0), +inf (S0 == +inf) or NaN
++    // (S0 < 0). Emitting a plain log2 instead lets those specials propagate
++    // into HDR tonemaps / exposure chains and shows up as black patches or
++    // blown-out highlights.
++    const IR::F32 src0{GetSrc<IR::F32>(inst.src[0])};
++    const IR::F32 clamped{
++        ir.FPClamp(src0, ir.Imm32(1.17549435e-38f), ir.Imm32(3.40282347e38f))};
++    SetDst(inst.dst[0], ir.FPLog2(clamped));
++}
++
++void Translator::V_RCP_CLAMP_F32(const GcnInst& inst) {
++    // D = clamp(1/S0, -FLT_MAX, FLT_MAX)  [GCN ISA: V_RCP_CLAMP_F32]
++    // Clamps the reciprocal so it saturates instead of overflowing to inf
++    // when S0 is zero or subnormal.
++    const IR::F32 src0{GetSrc<IR::F32>(inst.src[0])};
++    const IR::F32 recip{ir.FPRecip(src0)};
++    SetDst(inst.dst[0], ir.FPClamp(recip, ir.Imm32(-3.40282347e38f), ir.Imm32(3.40282347e38f)));
++}
++
++void Translator::V_RSQ_CLAMP_F32(const GcnInst& inst) {
++    // D = clamp(sqrt(1/S0), -FLT_MAX, FLT_MAX)  [GCN ISA: V_RSQ_CLAMP_F32]
++    // Clamps the reciprocal square root so it saturates instead of producing
++    // inf (S0 == 0) or NaN (S0 < 0) that would poison normalized vectors.
++    const IR::F32 src0{GetSrc<IR::F32>(inst.src[0])};
++    const IR::F32 rsq{ir.FPRecipSqrt(src0)};
++    SetDst(inst.dst[0], ir.FPClamp(rsq, ir.Imm32(-3.40282347e38f), ir.Imm32(3.40282347e38f)));
++}
++
++void Translator::V_RCP_CLAMP_F64(const GcnInst& inst) {
++    // D = clamp(1/S0, -DBL_MAX, DBL_MAX)  [GCN ISA: V_RCP_CLAMP_F64]
++    // Previously unhandled: the opcode fell through to LogMissingOpcode, which
++    // skips codegen and leaves the destination operand holding stale register
++    // data, silently corrupting any dependent double-precision math.
++    const IR::F64 src0{GetSrc64<IR::F64>(inst.src[0])};
++    const IR::F64 recip{ir.FPRecip(src0)};
++    SetDst64(inst.dst[0],
++             ir.FPClamp(recip, ir.Imm64(f64{-1.7976931348623157e308}),
++                        ir.Imm64(f64{1.7976931348623157e308})));
++}
++
++void Translator::V_RSQ_CLAMP_F64(const GcnInst& inst) {
++    // D = clamp(sqrt(1/S0), -DBL_MAX, DBL_MAX)  [GCN ISA: V_RSQ_CLAMP_F64]
++    // Previously unhandled, see V_RCP_CLAMP_F64 above.
++    const IR::F64 src0{GetSrc64<IR::F64>(inst.src[0])};
++    const IR::F64 rsq{ir.FPRecipSqrt(src0)};
++    SetDst64(inst.dst[0],
++             ir.FPClamp(rsq, ir.Imm64(f64{-1.7976931348623157e308}),
++                        ir.Imm64(f64{1.7976931348623157e308})));
++}
++
+ void Translator::V_RCP_F32(const GcnInst& inst) {
+     const IR::F32 src0{GetSrc<IR::F32>(inst.src[0])};
+     SetDst(inst.dst[0], ir.FPRecip(src0));
