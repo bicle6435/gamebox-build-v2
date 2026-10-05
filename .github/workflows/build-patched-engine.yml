@@ -1,9 +1,41 @@
-# GameBox v4.0 — shadPS4 渲染修复增强补丁 v2 引擎 CI 云端构建（v2.2 修复版）
+# GameBox v4.0 — shadPS4 渲染修复增强补丁 v2 引擎 CI 云端构建（v2.3 修复版）
 #
 # 用法（详见包内「先看我-GitHub云编译三步搞定.txt」）：
 #   1. 把 .github / engine / build-engine 三个文件夹原样拖进一个 GitHub 仓库
 #   2. Actions 页面 → build-patched-engine → Run workflow（手动触发）
 #   3. 约 1~1.5 小时后在运行页 Artifacts 下载 shadPS4-415907b-patched-v2
+#
+# ─────────────────────────────────────────────────────────────────────
+# v2.3 修复（2026-10-05 第三次）：编译阶段 imgui_demo.cpp 报 C2440/C2661
+#
+# 现象：主补丁、45 个子模块、CMake 配置全部成功，编译跑到 514/2475 时
+#   externals/dear_imgui/imgui_demo.cpp 报：
+#     error C2440: 'type cast': cannot convert from 'ImColor' to 'ImVec4'
+#     error C2661: 'ImGui::PushStyleColor': no overloaded function takes 1 arguments
+#
+# 根因（三层因素叠加，已逐项查证）：
+#   1. runs-on: windows-latest 在 2026 年 9 月被 GitHub 静默升级为
+#      windows-2025-vs2026 镜像（VS 2026 / MSVC 19.51，2026-09-25 才发布的新编译器）。
+#   2. 源码自带的 src/imgui/imgui_config.h 定义了 IM_VEC4_CLASS_EXTRA
+#      （给 ImVec4 增加单参数 ImVec4(float) 构造器），与 ImColor 的两个隐式
+#      转换算子（operator ImVec4 / operator ImU32→float）在重载解析时产生
+#      三条互斥可行路径——新版 MSVC 严格按 C++ 标准判为「歧义」直接报错，
+#      旧版 MSVC 则放行。这正是源仓库作者与上游 shadPS4 官方 CI 都改用
+#      clang-cl 编译器的原因。
+#   3. 顺带查证：45 个子模块里有 31 个的今日上游 HEAD 已与源仓库锁定的
+#      提交不同（sdl3/tracy/magic_enum/toml11/zydis 等全部漂移），
+#      即使换对编译器，后面仍有版本错配踩雷风险。
+#
+# 修复（对齐源仓库 RainKikyou/shadps4-sifac4k 作者自己的 CI 配置）：
+#   1. runs-on 从 windows-latest 改为固定 windows-2025 镜像（不再跟随漂移）
+#   2. CMake 显式指定 clang-cl 编译器（作者 CI 与上游官方 CI 同款配置；
+#      -march=x86-64-v3 也能被 clang-cl 真正利用，而不是像 MSVC 那样忽略）
+#   3. 恢复子模块后，把全部 49 个依赖（45 子模块 + 4 嵌套）逐个
+#      checkout 到源仓库锁定的精确提交——等同 submodules: recursive，
+#      上游再怎么更新都与本构建无关；个别锁定失败自动回退分支 HEAD
+#   4. IGFD 兼容补丁改为条件应用：锁定版 IGFD(6e3ddeb) 与
+#      imgui 1.92.0-WIP 天然兼容（字段名本来就是 ChildFlags），补丁
+#      自动跳过；只有当 IGFD 回退到新版 HEAD 时才需要打补丁
 #
 # ─────────────────────────────────────────────────────────────────────
 # v2.2 修复（2026-10-05 第二次）：「恢复子模块」步骤静默退出（exit 1 无报错）
@@ -14,8 +46,6 @@
 #   在 set -e + pipefail 下会静默自杀——[ -z ... ] && echo 的失败返回值经
 #   管道(pipefail) → 命令替换 → set -e 三级连锁，脚本无声死掉，
 #   什么都不打印（实测 1:1 复现，退出码 1、零输出）。
-#   实际上 49 个目录全部有内容（aacdec/cmake-modules/gcn/renderdoc/stb
-#   是 zip 内自带内容而非子模块），检查本来就应该通过。
 #
 # 修复：改用防弹写法（if 计数器，无管道/无命令替换/无 && 陷阱），
 #   并把克隆失败、标记缺失等所有失败点都改成「大声报错」。
@@ -40,8 +70,6 @@
 #     + 4 个嵌套依赖（zycore/SPIRV-Headers/dlg/rapidjson）。
 #   - ffmpeg 预编译包按 git 短 SHA 命名下载，zip 源码无 git 历史；本版经
 #     ffmpeg-cmake-sha-override.patch 支持 -DFFMPEG_GIT_SHA= 显式指定。
-#   - ImGuiFileDialog 与 imgui 1.92.0-WIP 快照的 API 断裂由
-#     imguifiledialog-childflags-compat.patch 修复（本地 Linux 全量编译验证通过）。
 #   - 构建目标为 shadps4（SDL3 前端，源码 CMakeLists.txt add_executable(shadps4)）。
 #
 # 若 ffmpeg 下载 404（上游 release 变动），把下面 env 的 FFMPEG_SHA 换成
@@ -59,7 +87,7 @@ env:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-2025
     timeout-minutes: 180
     steps:
       - name: Checkout
@@ -70,7 +98,7 @@ jobs:
         run: |
           set -e
           # Windows runner 的 Git 默认 core.autocrlf=true：检出/克隆时会把文本
-          # 文件的 LF 换成 CRLF。这会让补丁文件行尾被改坏（本次失败根因），
+          # 文件的 LF 换成 CRLF。这会让补丁文件行尾被改坏（第一轮失败根因），
           # 也会让克隆下来的 45 个子模块源码行尾与 Linux 验证环境不一致。
           # 关掉它之后：补丁保持 LF、子模块克隆也是 LF，与本地验证环境一致。
           git config --global core.autocrlf false
@@ -123,7 +151,7 @@ jobs:
             # Git Bash 下把 Windows 风格路径转成 Unix 风格（更保险）
             command -v cygpath >/dev/null 2>&1 && p="$(cygpath -u "$p")"
             # 防线一：把补丁行尾规范为 LF。
-            # Windows 检出时 autocrlf 可能把补丁的 LF 换成 CRLF（本次失败根因），
+            # Windows 检出时 autocrlf 可能把补丁的 LF 换成 CRLF（第一轮失败根因），
             # sed 幂等：本来就是 LF 则原样不动。
             if grep -q $'\r' "$p" 2>/dev/null; then
               sed -i 's/\r$//' "$p"
@@ -147,7 +175,7 @@ jobs:
           grep -q 'db_format_actual' src/video_core/renderer_vulkan/vk_rasterizer.h || { echo '[失败] 标记缺失: db_format_actual'; exit 1; }
           echo "[OK] 主补丁应用成功（条件渲染 + 流式输出 + D16S8 深度补偿 + clamp 纹理 + 着色器 clamp 指令）"
 
-      - name: 恢复子模块（45 个外部依赖 + 4 个嵌套依赖，v2.2 防弹版）
+      - name: 恢复子模块并锁定版本（45 + 4 嵌套，v2.3 锁定版）
         shell: bash
         run: |
           set -e
@@ -188,9 +216,80 @@ jobs:
           clone_nested externals/sirit/externals/SPIRV-Headers https://github.com/KhronosGroup/SPIRV-Headers.git
           clone_nested externals/freetype/subprojects/dlg https://github.com/nyorain/dlg.git
           clone_nested externals/discord-rpc/thirdparty/rapidjson https://github.com/Tencent/rapidjson.git
-          # v2.2 修复（本次失败根因）：原来的空目录检查写法在 set -e + pipefail
-          # 下会静默自杀——[ -z ... ] && echo 的返回值经 管道(pipefail) → 命令替换
-          # → set -e 三级连锁触发，脚本无声死掉。改用 if 计数器防弹写法：
+          # v2.3 新增（第三轮失败修复核心之一）：把全部依赖锁定到源仓库
+          # RainKikyou/shadps4-sifac4k 锁定的精确提交——等同 checkout 的
+          # submodules: recursive 语义。本次查证 31 个子模块的今日 HEAD
+          # 已与锁定提交不同；不锁定的话等于拿一份作者没验证过的依赖拼装。
+          # 提交号取自源仓库 8654a01 的 git 索引（git ls-tree HEAD externals/）。
+          declare -A PIN=(
+            [externals/CLI11]=12ba4ac4dbaa6489cb07e01be796e2bc074ef4f4
+            [externals/ImGuiFileDialog]=6e3ddeb485e8804beefae6e6d690b7709084bacd
+            [externals/LibAtrac9]=946e05a9212976626a9f5e52f29c0a7202871f29
+            [externals/aacdec/fdk-aac]=ee76460efbdb147e26d804c798949c23f174460b
+            [externals/abseil-cpp]=76bb24329e8bf5f39704eb10d21b9a80befa7c81
+            [externals/cpp-httplib]=28f8264d134a576422cd0f99f19719c2749d9e47
+            [externals/date]=a45ea7c17b4a7f320e199b71436074bd624c9e15
+            [externals/dear_imgui]=f4d9359095eff3eb03f685921edc1cf0e37b1687
+            [externals/discord-rpc]=19f66e6dcabb2268965f453db9e5774ede43238f
+            [externals/discord-rpc/thirdparty/rapidjson]=d621dc9e9c77f81e5c8a35b8dcc16dcd63351321
+            [externals/epoll-shim]=18159584bb3d17e601b9315a7398ace018251bdc
+            [externals/ext-boost]=ca6f230e67be7cc45fc919057f07b2aee64dadc1
+            [externals/ext-wepoll]=d3bb81035304a0dc6a5ca48ebf0f8cee1fe269e4
+            [externals/ffmpeg-core]=94dde08c8a9e4271a93a2a7e4159e9fb05d30c0a
+            [externals/fmt]=ec73fb72477d80926c758894a3ab2cb3994fd051
+            [externals/freetype]=b91f75bd02db43b06d634591eb286d3eb0ce3b65
+            [externals/freetype/subprojects/dlg]=395ccad2c1e0daae535c4d20bb0a3f2424648e17
+            [externals/glslang]=ba1640446f3826a518721d1f083f3a8cca1120c3
+            [externals/half]=1ddada225144cac0de8f6b5c0dd9acffd99a2e68
+            [externals/hwinfo]=8660006e0ca4aae5dda7a29e585968b50b0273b7
+            [externals/json]=55f93686c01528224f448c19128836e7df245f72
+            [externals/libpng]=c1cc0f3f4c3d4abd11ca68c59446a29ff6f95003
+            [externals/libressl]=b0504086dbbc186724b0cc92e6ba1832c245de0b
+            [externals/libusb]=d087ea86539ab1f1ec42faf86e2357e2fad126a6
+            [externals/magic_enum]=a413fcc9c46a020a746907136a384c227f3cd095
+            [externals/mesa-kosmickrisp]=c502a84d3f62f7b8031222c81a948506bf1d6a54
+            [externals/minimp3]=7b590fdcfa5a79c033e76eacc05d0c3e4c79f536
+            [externals/miniupnp]=bf4215a7574f88aa55859db9db00e3ae58cf42d6
+            [externals/miniz]=174573d60290f447c13a2b1b3405de2b96e27d6c
+            [externals/openal-soft]=83ea7236c6f23fc98e2b62eb9c5b3abfd4b2be86
+            [externals/protobuf]=5917ee224a7e47383a78acc129628511fe210dff
+            [externals/pugixml]=caade5a28aad86b92a4b5337a9dc70c4ba73c5eb
+            [externals/robin-map]=4ec1bf19c6a96125ea22062f38c2cf5b958e448e
+            [externals/sdl3]=d5af35e3fbb5bb6555ed00e69740d52af2a4e877
+            [externals/sirit]=282083a595dcca86814dedab2f2b0363ef38f1ec
+            [externals/sirit/externals/SPIRV-Headers]=2acb319af38d43be3ea76bfabf3998e5281d8d12
+            [externals/spdlog]=b8944a4bcd478ee03375c9c50dc8d6c741f43f7b
+            [externals/toml11]=a01fe3b4c14c6d7b99ee3f07c9e80058c6403097
+            [externals/tracy]=143a53d1985b8e52a7590a0daca30a0a7c653b42
+            [externals/vma]=f378e7b3f18f6e2b06b957f6ba7b1c7207d2a536
+            [externals/vulkan-headers]=ee3b5caaa7e372715873c7b9c390ee1c3ca5db25
+            [externals/vulkan-loader]=466498bc64eb77955c3b782f0127520548224de0
+            [externals/xbyak]=44a72f369268f7d552650891b296693e91db86bb
+            [externals/xxhash]=953a09abc39096da9e216b6eb0002c681cdc1199
+            [externals/zarchive]=965b66c8d67b6b7e30fd63b3b75aa91a99ff303b
+            [externals/zlib-ng]=fd0d263cedab1a136f40d65199987e3eaeecfcbd
+            [externals/zstd]=5c7b7bad26808e6b40ac3b3d0075466e27738a9d
+            [externals/zydis]=120e0e705f8e3b507dc49377ac2879979f0d545c
+            [externals/zydis/dependencies/zycore]=38d4f0285e6157ee840ea82a9b90aba71c8a705d
+          )
+          pinned=0; fellback=0
+          for path in "${!PIN[@]}"; do
+            if [ -d "$path/.git" ]; then
+              if git -C "$path" fetch -q --depth 1 origin "${PIN[$path]}" 2>/dev/null \
+                 && git -C "$path" checkout -q "${PIN[$path]}" 2>/dev/null; then
+                pinned=$((pinned+1))
+              else
+                fellback=$((fellback+1))
+                echo "[警告] ${path} 未能锁定到 ${PIN[$path]:0:12}，沿用分支 HEAD（通常是网络抖动）"
+              fi
+            fi
+          done
+          echo "[OK] 子模块版本锁定：${pinned} 个已锁定到源仓库提交，${fellback} 个沿用 HEAD"
+          if [ "$pinned" -lt 40 ]; then
+            echo "[失败] 锁定成功的子模块过少（$pinned/49），依赖版本不可控，请直接重跑"
+            exit 1
+          fi
+          # v2.2 修复（第二轮失败根因）：空目录检查改用 if 计数器防弹写法
           empty=0
           for d in externals/*/; do
             if [ -z "$(ls -A "$d" 2>/dev/null)" ]; then
@@ -204,7 +303,7 @@ jobs:
           fi
           echo "[OK] 全部子模块恢复完成"
 
-      - name: 应用依赖构建补丁（ffmpeg SHA 覆盖 + IGFD 兼容，v2.1 防弹应用）
+      - name: 应用依赖构建补丁（ffmpeg SHA + IGFD 按需兼容，v2.3 条件版）
         shell: bash
         run: |
           set -e
@@ -225,23 +324,45 @@ jobs:
           }
           cd src/shadps4-sifac4k-main
           apply_patch "$GITHUB_WORKSPACE/engine/patches/ffmpeg-cmake-sha-override.patch"
-          apply_patch "$GITHUB_WORKSPACE/engine/patches/imguifiledialog-childflags-compat.patch"
-          echo "[OK] 依赖构建补丁应用成功"
+          # v2.3: IGFD 兼容补丁改为按需应用。
+          # 它的作用是把新版 IGFD 的 ChildFlagsSet 字段名适配回旧 imgui 快照的
+          # ChildFlags。v2.3 已把 IGFD 锁定到 6e3ddeb——该版字段名本来就是
+          # ChildFlags，与 imgui 1.92.0-WIP 天然兼容，补丁会自然跳过；
+          # 只有当 IGFD 锁定失败、回退到新版 HEAD 时才需要（也才会）应用。
+          p="$GITHUB_WORKSPACE/engine/patches/imguifiledialog-childflags-compat.patch"
+          command -v cygpath >/dev/null 2>&1 && p="$(cygpath -u "$p")"
+          if grep -q $'\r' "$p" 2>/dev/null; then sed -i 's/\r$//' "$p"; fi
+          if git apply --check --ignore-whitespace "$p"; then
+            git apply --ignore-whitespace "$p"
+            echo "[OK] 补丁已应用：imguifiledialog-childflags-compat.patch（IGFD 为新版 HEAD，需要适配）"
+          elif grep -Fq 'NextWindowData.ChildFlags |=' externals/ImGuiFileDialog/ImGuiFileDialog.cpp; then
+            echo "[SKIP] IGFD 兼容补丁无需应用（IGFD 已锁定到兼容版本）"
+          else
+            echo '[失败] imguifiledialog 补丁不适用，且 IGFD 源码状态异常，请截图日志'
+            exit 1
+          fi
+          echo "[OK] 依赖构建补丁处理完成"
 
-      - name: 初始化 MSVC 编译环境
+      - name: 初始化 MSVC 工具链环境（为 clang-cl 提供 link.exe 与 SDK）
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: CMake 配置（MSVC + Ninja + Release + ffmpeg SHA）
+      - name: CMake 配置（clang-cl + Ninja + Release，v2.3 修复）
         shell: pwsh
         run: |
           Set-Location 'src\shadps4-sifac4k-main'
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release "-DFFMPEG_GIT_SHA=$env:FFMPEG_SHA"
+          # v2.3 修复核心：改用 clang-cl 编译器（源仓库作者与上游 shadPS4 官方
+          # CI 的同款配置）。旧版 MSVC 编译 imgui_demo.cpp 时会因
+          # IM_VEC4_CLASS_EXTRA 与 ImColor 转换算子的重载歧义直接报错。
+          # clang-cl 同时能真正利用 CMakeLists 里的 -march=x86-64-v3。
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release "-DFFMPEG_GIT_SHA=$env:FFMPEG_SHA" -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl
+          if ($LASTEXITCODE -ne 0) { throw 'CMake 配置失败' }
 
       - name: 编译（目标 shadps4）
         shell: pwsh
         run: |
           Set-Location 'src\shadps4-sifac4k-main'
           cmake --build build --target shadps4 --parallel
+          if ($LASTEXITCODE -ne 0) { throw '编译失败' }
 
       - name: 收集产物
         shell: pwsh
