@@ -1,9 +1,69 @@
-# GameBox v4.0 — shadPS4 渲染修复增强补丁 v2 引擎 CI 云端构建（v2.3 修复版）
+# GameBox v4.0 — shadPS4 渲染修复增强补丁 v2+v3+v4 引擎 CI 云端构建（v4.0）
 #
-# 用法（详见包内「先看我-GitHub云编译三步搞定.txt」）：
+# 用法（详见包内「先看我-GitHub云编译三步搞定-v4.txt」）：
 #   1. 把 .github / engine / build-engine 三个文件夹原样拖进一个 GitHub 仓库
+#      （替换旧版同名文件夹/同名文件；删除旧版 engine/patches/single-files 也行）
 #   2. Actions 页面 → build-patched-engine → Run workflow（手动触发）
-#   3. 约 1~1.5 小时后在运行页 Artifacts 下载 shadPS4-415907b-patched-v2
+#   3. 约 1~1.5 小时后在运行页 Artifacts 下载 shadPS4-415907b-patched-v4
+#
+# ─────────────────────────────────────────────────────────────────────
+# v4.0 新增（2026-10-06）：Vulkan 性能优化出厂默认（管线缓存预置 + 呈现模式确认）
+#
+# 新增 shadps4-gamebox-v4-vulkan-defaults.patch（2 文件 47 行）：
+#
+#   1. 管线缓存预置（本次真正的引擎层修复）：
+#      上游出厂默认 pipeline_cache_enabled = false（关）——即每次启动都
+#      全量重编着色器/管线，卡顿付了却从不复用。v4 翻转为 true（开）：
+#      首次运行编译并归档管线，之后每次启动 WarmUp() 预载入全部管线
+#      （日志可见 "Preloaded N pipelines"），启动后不再逐管线编译卡顿。
+#      同时 pipeline_cache_archived = true：每个游戏的缓存归档为单个
+#      zip 文件（整洁、备份/预置到新机器只需拷一个文件）。
+#   2. FIFO/Mailbox 呈现模式：引擎出厂默认本就是 "Mailbox"（三重缓冲：
+#      不撕裂 + 低呈现延迟，弱显卡最优）；驱动不支持时自动回退 Fifo。
+#      v4 补丁新增去重 INFO 日志 "Present mode: ..."，启动日志里可直接
+#      确认 Mailbox 生效——不改逻辑，只把最优模式变得可见可验证。
+#   3. 独显直连：gpu_id 出厂默认 -1（自动），引擎自动选择排序规则本就
+#      优先独立显卡（API 版本 → 独立显卡 → 显存最大），Optimus 双显卡
+#      笔记本自动选 GTX 960M；无需改动，与 GameBox 前端 gpuId 选择双保险。
+#
+#   说明：GameBox v4.0 前端自身也有 migrate40 一次性迁移（写 Mailbox +
+#   管线缓存开）——但那依赖前端在位且写入成功。v4 补丁把最优值固化进
+#   引擎出厂默认：引擎独立运行 / 前端写入失败 / 全新用户目录时同样生效。
+#
+# v3.1 新增（2026-10-06）：消除 Node.js 20 弃用警告（升级 action 运行时）
+#
+# GitHub 平台自 2025-09-19 起，把 JS action 的运行时强制迁移到 Node 24，
+# 仍在 node20 运行时上的 action 会在构建页顶部显示黄色警告：
+#   "Node.js 20 actions are deprecated. ... Please update the following
+#    actions to use Node.js 24"
+# 警告不影响编译产物与游戏运行（纯平台通知），但本版把能升的全升了：
+#
+#   1. actions/checkout@v4 → @v5（v5 = node24，实测验证）
+#   2. actions/upload-artifact@v4 → @v6.0.0（v6 = node24，实测验证）
+#      ⚠ 升级陷阱：upload-artifact@v5.0.0 仍是 node20，别升到 v5！
+#   3. ilammy/msvc-dev-cmd@v1 —— 截至本版发布时，最新 v1.13.0 仍是
+#      node20，作者尚未发布 Node 24 版本。此条警告暂时无法消除，
+#      但完全无害（该 action 只负责初始化 MSVC 环境变量，早已运行成功）。
+#      升级动作保持 v1 大版本不变，作者发布新运行时后无需改任何参数。
+#
+# 历次编译问题与修复（autocrlf / MSVC / 子模块等）详见包内
+# 《GitHub编译问题历史与预防手册.txt》，供日后排查参考。
+#
+# ─────────────────────────────────────────────────────────────────────
+# v3.0 新增（2026-10-06）：遮挡查询加固 + 产物命名对齐前端检测
+#
+# 1. 新增 shadps4-gamebox-v3-occlusion-query.patch（2 文件 47 行）：
+#    - 修复：合成遮挡计数器首次查询报告“0 可见样本”——游戏会把 0
+#      判为“完全遮挡”，直接剔除几何体（机体隐形）或跳过条件清除
+#      （贴图残影跟随机体永不消失）。v3 让首次查询即报告“可见”。
+#    - 诊断：IT_SET_PREDICATION / ZpassDone / 谓词值三条 INFO 日志，
+#      游戏实际走哪条可见性链路，日志一眼可见，后续排查有据可依。
+# 2. 产物命名修正（对齐 GameBox v4.0 前端真实检测逻辑，源码实证）：
+#    - 前端体检页只认 build-engine\output\shadPS4-415907b-patched.exe
+#      （main.js enginePatchState 函数，无 -v2 后缀、在 output 子目录）
+#    - v2 产物名 shadPS4-415907b-patched-v2.exe 导致体检页永远显示
+#      “未找到”——本版产物改回 shadPS4-415907b-patched.exe 并在包内
+#      附精确装回步骤（引擎目录 + 版本管理器勾选，缺一不可）
 #
 # ─────────────────────────────────────────────────────────────────────
 # v2.3 修复（2026-10-05 第三次）：编译阶段 imgui_demo.cpp 报 C2440/C2661
@@ -91,7 +151,8 @@ jobs:
     timeout-minutes: 180
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        # v3.1: @v5 = Node 24 运行时（@v4 为 node20，会触发弃用警告）
+        uses: actions/checkout@v5
 
       - name: 初始化 Git 行尾配置（v2.1 修复：关掉 autocrlf）
         shell: bash
@@ -142,7 +203,7 @@ jobs:
           if (-not (Test-Path 'src\shadps4-sifac4k-main\CMakeLists.txt')) { throw '解压后未找到 src\shadps4-sifac4k-main\CMakeLists.txt（源码包不完整）' }
           Write-Host '[OK] 源码解压完成'
 
-      - name: 应用渲染修复主补丁（v2：10 文件 611 行，v2.1 防弹应用）
+      - name: 应用渲染修复主补丁（v2：10 文件 611 行 + v3：2 文件 47 行 + v4：2 文件 47 行，v2.1 防弹应用）
         shell: bash
         run: |
           set -e
@@ -174,6 +235,16 @@ jobs:
           grep -q 'V_LOG_CLAMP_F32' src/shader_recompiler/frontend/translate/translate.h || { echo '[失败] 标记缺失: V_LOG_CLAMP_F32'; exit 1; }
           grep -q 'db_format_actual' src/video_core/renderer_vulkan/vk_rasterizer.h || { echo '[失败] 标记缺失: db_format_actual'; exit 1; }
           echo "[OK] 主补丁应用成功（条件渲染 + 流式输出 + D16S8 深度补偿 + clamp 纹理 + 着色器 clamp 指令）"
+          apply_patch "$GITHUB_WORKSPACE/engine/patches/shadps4-gamebox-v3-occlusion-query.patch"
+          grep -q 'pixel_counter = 0x2FFFFFFULL' src/video_core/amdgpu/liverpool.cpp || { echo '[失败] 标记缺失: v3 遮挡计数器初始化'; exit 1; }
+          grep -q 's_zpass_query_logged' src/video_core/amdgpu/liverpool.cpp || { echo '[失败] 标记缺失: v3 ZpassDone 诊断日志'; exit 1; }
+          grep -q 's_diag_addr' src/video_core/renderer_vulkan/vk_rasterizer.cpp || { echo '[失败] 标记缺失: v3 谓词值诊断'; exit 1; }
+          echo "[OK] v3 遮挡查询补丁应用成功（查询永不报告零 + 谓词值诊断日志）"
+          apply_patch "$GITHUB_WORKSPACE/engine/patches/shadps4-gamebox-v4-vulkan-defaults.patch"
+          grep -q 'pipeline_cache_enabled{true}' src/core/emulator_settings.h || { echo '[失败] 标记缺失: v4 管线缓存默认开'; exit 1; }
+          grep -q 'pipeline_cache_archived{true}' src/core/emulator_settings.h || { echo '[失败] 标记缺失: v4 管线缓存归档模式'; exit 1; }
+          grep -q 's_mode_first_log' src/video_core/renderer_vulkan/vk_swapchain.cpp || { echo '[失败] 标记缺失: v4 呈现模式日志'; exit 1; }
+          echo "[OK] v4 Vulkan 默认优化补丁应用成功（管线缓存预置 + Mailbox 确认日志）"
 
       - name: 恢复子模块并锁定版本（45 + 4 嵌套，v2.3 锁定版）
         shell: bash
@@ -344,6 +415,9 @@ jobs:
           echo "[OK] 依赖构建补丁处理完成"
 
       - name: 初始化 MSVC 工具链环境（为 clang-cl 提供 link.exe 与 SDK）
+        # v3.1 说明：该 action 最新 v1.13.0 仍为 node20 运行时，作者未发布
+        # Node 24 版本——它触发的警告目前无法通过升级消除，但完全无害。
+        # 保持 @v1 主版本，作者更新运行时后自动受益，无需改参数。
         uses: ilammy/msvc-dev-cmd@v1
 
       - name: CMake 配置（clang-cl + Ninja + Release，v2.3 修复）
@@ -370,14 +444,18 @@ jobs:
           New-Item -ItemType Directory -Force -Path artifact | Out-Null
           $exe = Get-ChildItem -Path 'src\shadps4-sifac4k-main\build' -Recurse -Filter 'shadps4*.exe' | Select-Object -First 1
           if (-not $exe) { throw '未找到编译产物 shadps4.exe' }
-          Copy-Item $exe.FullName 'artifact\shadPS4-415907b-patched-v2.exe'
-          Copy-Item 'engine\patches\修复补丁说明-v2.md' 'artifact\' -ErrorAction SilentlyContinue
+          # v3: 产物名对齐 GameBox v4.0 前端体检页检测逻辑（无 -v2 后缀）
+          Copy-Item $exe.FullName 'artifact\shadPS4-415907b-patched.exe'
+          Copy-Item 'engine\patches\修复补丁说明-v4.md' 'artifact\' -ErrorAction SilentlyContinue
+          Copy-Item 'engine\patches\装回说明-v4.txt' 'artifact\' -ErrorAction SilentlyContinue
           Write-Host ("[OK] 产物：{0}（{1:N1} MB）" -f $exe.FullName, ($exe.Length/1MB))
           Get-ChildItem artifact
 
       - name: 上传 Artifacts
-        uses: actions/upload-artifact@v4
+        # v3.1: @v6.0.0 = Node 24 运行时（@v4 为 node20；⚠ @v5.0.0 陷阱：
+        # v5.0.0 仍是 node20，升级时请直接跳到 v6）
+        uses: actions/upload-artifact@v6.0.0
         with:
-          name: shadPS4-415907b-patched-v2
+          name: shadPS4-415907b-patched-v4
           path: artifact/
           retention-days: 90
