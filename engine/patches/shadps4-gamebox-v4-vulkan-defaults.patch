@@ -1,0 +1,47 @@
+diff --git a/src/core/emulator_settings.h b/src/core/emulator_settings.h
+index 74475ea..e297d2a 100644
+--- a/src/core/emulator_settings.h
++++ b/src/core/emulator_settings.h
+@@ -478,8 +478,14 @@ struct VulkanSettings {
+     Setting<bool> vkcrash_diagnostic_enabled{false};
+     Setting<bool> vkhost_markers{false};
+     Setting<bool> vkguest_markers{false};
+-    Setting<bool> pipeline_cache_enabled{false};
+-    Setting<bool> pipeline_cache_archived{false};
++    // v4 (GameBox Vulkan defaults): upstream shipped the pipeline cache
++    // disabled, so every launch paid full shader-recompile stutter and nothing
++    // was ever reused. Enabled by default now: the first run compiles and
++    // archives pipelines; later launches preload them via PipelineCache::WarmUp
++    // ("Preloaded N pipelines" shows up in the log). Archived mode stores each
++    // game's cache as a single zip in the cache dir (tidier, easy to back up).
++    Setting<bool> pipeline_cache_enabled{true};
++    Setting<bool> pipeline_cache_archived{true};
+     std::vector<OverrideItem> GetOverrideableFields() const {
+         return std::vector<OverrideItem>{
+             make_override<VulkanSettings>("gpu_id", &VulkanSettings::gpu_id),
+diff --git a/src/video_core/renderer_vulkan/vk_swapchain.cpp b/src/video_core/renderer_vulkan/vk_swapchain.cpp
+index 4904319..474634e 100644
+--- a/src/video_core/renderer_vulkan/vk_swapchain.cpp
++++ b/src/video_core/renderer_vulkan/vk_swapchain.cpp
+@@ -219,6 +219,21 @@ void Swapchain::FindPresentMode() {
+                     vk::to_string(present_mode), vk::to_string(fallback));
+         present_mode = fallback;
+     }
++
++    // v4 (GameBox Vulkan defaults): log the effective present mode (deduped)
++    // so users can confirm the performance-optimal Mailbox path is actually
++    // active. Mailbox = triple buffering: no tearing and low presentation
++    // latency, the best default for weak GPUs like the GTX 960M. The engine
++    // factory default for the present_mode setting is already "Mailbox" and
++    // gpu_id stays -1, whose auto-selection prefers discrete GPUs.
++    static bool s_mode_first_log = true;
++    static vk::PresentModeKHR s_logged_mode{};
++    if (s_mode_first_log || present_mode != s_logged_mode) {
++        s_mode_first_log = false;
++        s_logged_mode = present_mode;
++        LOG_INFO(Render, "Present mode: {} (requested: {})",
++                 vk::to_string(present_mode), EmulatorSettings.GetPresentMode());
++    }
+ }
+ 
+ void Swapchain::SetSurfaceProperties() {

@@ -1,0 +1,85 @@
+diff --git a/src/video_core/amdgpu/liverpool.cpp b/src/video_core/amdgpu/liverpool.cpp
+index 92de56b..38d3dde 100644
+--- a/src/video_core/amdgpu/liverpool.cpp
++++ b/src/video_core/amdgpu/liverpool.cpp
+@@ -67,6 +67,13 @@ static std::span<const u32> NextPacket(std::span<const u32> span, size_t offset)
+ 
+ Liverpool::Liverpool() {
+     num_counter_pairs = Libraries::Kernel::sceKernelIsNeoMode() ? 16 : 8;
++    // v3: The synthetic occlusion counter starts at zero, so the very first
++    // ZpassDone query reports "0 visible samples". Games treat that as
++    // "fully occluded" and cull geometry (invisible characters) or skip
++    // conditional clears (stale decal artifacts that follow the character).
++    // Start at a healthy non-zero count so the first query already reports
++    // "visible"; the counter keeps incrementing per query afterwards.
++    pixel_counter = 0x2FFFFFFULL;
+     process_thread = std::jthread{std::bind_front(&Liverpool::Process, this)};
+ }
+ 
+@@ -425,8 +432,15 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+                     predication.inverted = predication_cmd->op.Value() != 0;
+                     predication.bool64 = predication_cmd->bool64.Value() != 0;
+                 }
+-                LOG_TRACE(Render, "IT_SET_PREDICATION {} address {:#x}",
+-                           predication.enabled ? "enabled" : "disabled", address);
++                static u64 s_last_pred_log_addr = ~0ull;
++                if (address != s_last_pred_log_addr) {
++                    s_last_pred_log_addr = address;
++                    // v3: TRACE is invisible with default log settings; log each
++                    // distinct predication target once at INFO so logs show whether
++                    // the game drives conditional rendering at all.
++                    LOG_INFO(Render, "IT_SET_PREDICATION {} address {:#x}",
++                             predication.enabled ? "enabled" : "disabled", address);
++                }
+                 break;
+             }
+             case PM4ItOpcode::IndexType: {
+@@ -704,6 +718,17 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+                         for (s32 i = 0; i < num_counter_pairs; ++i, results += 2) {
+                             *results = pixel_counter | OcclusionCounterValidMask;
+                         }
++                        // v3: one-time INFO so logs reveal whether the game uses the
++                        // occlusion-query path at all, and which value it observes.
++                        static bool s_zpass_query_logged = false;
++                        if (!s_zpass_query_logged) {
++                            s_zpass_query_logged = true;
++                            LOG_INFO(Render,
++                                     "Occlusion query (ZpassDone) synthesized: {} visible "
++                                     "samples written to {:#x} ({} counter pairs)",
++                                     pixel_counter, event->Address<u64>(),
++                                     num_counter_pairs);
++                        }
+                         pixel_counter += OcclusionCounterStep;
+                     }
+                 }
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index 4ea438b..ab495b7 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -231,6 +231,26 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
+     const auto cmdbuf = scheduler.CommandBuffer();
+     vk::ConditionalRenderingBeginInfoEXT conditional_rendering_info{};
+     if (use_conditional_rendering) {
++        // v3 diagnostic: read the live predicate value from guest memory.
++        // Games whose predicate buffer is never written by an emulated
++        // occlusion query leave it at zero, which silently culls every
++        // predicated draw (invisible geometry). Surfacing the value in the
++        // log (deduped) pinpoints that case immediately.
++        static u64 s_diag_addr = ~0ull;
++        static u64 s_diag_val = ~0ull;
++        const u64 pred_val =
++            predication.bool64
++                ? *reinterpret_cast<const u64*>(predication.address)
++                : u64(*reinterpret_cast<const u32*>(predication.address));
++        if (predication.address != s_diag_addr || pred_val != s_diag_val) {
++            s_diag_addr = predication.address;
++            s_diag_val = pred_val;
++            LOG_INFO(Render_Vulkan,
++                     "Conditional rendering active: predicate value {:#x} at {:#x} "
++                     "({}-bit{})",
++                     pred_val, predication.address, predication.bool64 ? 64 : 32,
++                     predication.inverted ? ", inverted" : "");
++        }
+         scheduler.EndRendering();
+         auto [predicate_buffer, predicate_offset] =
+             buffer_cache.ObtainBuffer(predication.address,

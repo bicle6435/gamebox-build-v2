@@ -9,7 +9,7 @@ rem   2. Git for Windows          https://git-scm.com/download/win
 rem   3. CMake (>= 3.24)          https://cmake.org/download/
 rem
 rem 用法：把本文件与 source 分卷放在同一文件夹，双击运行（或 cmd 里执行）。
-rem 产物：本文件夹下 shadPS4-415907b-patched-v2.exe
+rem 产物：本文件夹 output\shadPS4-415907b-patched.exe（与 GameBox 体检页检测路径一致）
 rem ============================================================================
 
 setlocal enabledelayedexpansion
@@ -19,7 +19,7 @@ set "SRCDIR=src\shadps4-sifac4k-main"
 set "FFMPEG_SHA=94dde08"
 
 echo.
-echo ===== GameBox shadPS4 增强补丁引擎构建 v2 =====
+echo ===== GameBox shadPS4 增强补丁引擎构建 v2+v3+v4 =====
 echo.
 
 rem ---- 工具检查 ----
@@ -53,7 +53,7 @@ rem ---- 应用补丁 ----
 cd /d "%~dp0"
 pushd "%SRCDIR%"
 if exist .patched-v2 (
-    echo [OK] 补丁已应用，跳过
+    echo [OK] v2 主补丁已应用，跳过
 ) else (
     echo 正在应用主补丁（10 文件 611 行）……
     rem v2.1: --ignore-whitespace 防止克隆文件 CRLF 行尾导致 patch does not apply
@@ -67,7 +67,28 @@ if exist .patched-v2 (
     git apply --ignore-whitespace "..\..\engine\patches\imguifiledialog-childflags-compat.patch" || goto :fail_popd
     echo ok > .patched-v2
 )
-echo [OK] 补丁全部就绪
+rem v3: 独立标记块——曾跑过 v2 的老目录重跑本脚本时只会补上 v3，不会重复应用 v2
+if exist .patched-v3 (
+    echo [OK] v3 遮挡查询补丁已应用，跳过
+) else (
+    echo 正在应用 v3 遮挡查询补丁（2 文件 47 行：查询永不报告零 + 诊断日志）……
+    git apply --check --ignore-whitespace "..\..\engine\patches\shadps4-gamebox-v3-occlusion-query.patch" || goto :fail_popd
+    git apply --ignore-whitespace "..\..\engine\patches\shadps4-gamebox-v3-occlusion-query.patch" || goto :fail_popd
+    findstr /C:"pixel_counter = 0x2FFFFFFULL" src\video_core\amdgpu\liverpool.cpp >nul || (echo [失败] v3 标记缺失 & goto :fail_popd)
+    echo ok > .patched-v3
+)
+rem v4: 独立标记块——Vulkan 出厂默认优化（管线缓存预置 + Mailbox 确认日志）
+if exist .patched-v4 (
+    echo [OK] v4 Vulkan 默认优化补丁已应用，跳过
+) else (
+    echo 正在应用 v4 Vulkan 默认优化补丁（2 文件 47 行：管线缓存预置 + Mailbox 日志）……
+    git apply --check --ignore-whitespace "..\..\engine\patches\shadps4-gamebox-v4-vulkan-defaults.patch" || goto :fail_popd
+    git apply --ignore-whitespace "..\..\engine\patches\shadps4-gamebox-v4-vulkan-defaults.patch" || goto :fail_popd
+    findstr /C:"pipeline_cache_enabled{true}" src\core\emulator_settings.h >nul || (echo [失败] v4 标记缺失：管线缓存默认 & goto :fail_popd)
+    findstr /C:"s_mode_first_log" src\video_core\renderer_vulkan\vk_swapchain.cpp >nul || (echo [失败] v4 标记缺失：呈现模式日志 & goto :fail_popd)
+    echo ok > .patched-v4
+)
+echo [OK] 补丁全部就绪（v2 主补丁 + v3 遮挡查询补丁 + v4 Vulkan 默认优化）
 
 rem ---- CMake 配置 + 编译（VS 2022 生成器，自动并行）----
 if not exist build\CMakeCache.txt (
@@ -77,18 +98,22 @@ if not exist build\CMakeCache.txt (
 echo 正在编译 shadps4（首次约 40-70 分钟，耐心等待）……
 cmake --build build --config Release --target shadps4 --parallel || goto :fail_popd
 
-rem ---- 收集产物 ----
+rem ---- 收集产物（v3：输出到 output\ 子目录，与 GameBox 前端体检页检测路径一致）----
+if not exist "%~dp0output" mkdir "%~dp0output"
 for /R "build" %%f in (shadps4.exe) do (
-    copy /y "%%f" "%~dp0shadPS4-415907b-patched-v2.exe" >nul
+    copy /y "%%f" "%~dp0output\shadPS4-415907b-patched.exe" >nul
 )
-if not exist "%~dp0shadPS4-415907b-patched-v2.exe" (
+if not exist "%~dp0output\shadPS4-415907b-patched.exe" (
     echo [错误] 编译完成但没找到 shadps4.exe，请检查上方日志
     goto :fail_popd
 )
 echo.
 echo ===== 构建成功！ =====
-echo 产物: %~dp0shadPS4-415907b-patched-v2.exe
-echo 替换到 GameBox: 把它改名为 shadPS4-415907b.exe 覆盖 GameBox 主程序目录同名文件
+echo 产物: %~dp0output\shadPS4-415907b-patched.exe
+echo 装回 GameBox（两步缺一不可）：
+echo   1. 把产物复制到 GameBox-v4.0\engine\shadps4\（与原版并排，不删原版）
+echo   2. GameBox 设置→版本管理器→新增自订→选中它→勾选启用
+echo      （体检页「补丁引擎编译产物」会同步显示就绪）
 echo.
 popd
 endlocal
