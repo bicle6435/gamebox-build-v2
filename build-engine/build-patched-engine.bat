@@ -88,7 +88,19 @@ if exist .patched-v4 (
     findstr /C:"s_mode_first_log" src\video_core\renderer_vulkan\vk_swapchain.cpp >nul || (echo [失败] v4 标记缺失：呈现模式日志 & goto :fail_popd)
     echo ok > .patched-v4
 )
-echo [OK] 补丁全部就绪（v2 主补丁 + v3 遮挡查询补丁 + v4 Vulkan 默认优化）
+rem v5.1【闪退根因修复】：GPU 鲁棒选择（核显断言 0x80000003 根治）
+if exist .patched-v5 (
+    echo [OK] v5 GPU 鲁棒选择补丁已应用，跳过
+) else (
+    echo 正在应用 v5 GPU 鲁棒选择补丁（1 文件 76 行：显式索引校验回退 + 越界钳制 + Using GPU 日志）……
+    git apply --check --ignore-whitespace "..\..\engine\patches\shadps4-gamebox-v5-gpu-select.patch" || goto :fail_popd
+    git apply --ignore-whitespace "..\..\engine\patches\shadps4-gamebox-v5-gpu-select.patch" || goto :fail_popd
+    findstr /C:"pick_best_device" src\video_core\renderer_vulkan\vk_instance.cpp >nul || (echo [失败] v5 标记缺失：最佳设备选择器 & goto :fail_popd)
+    findstr /C:"Using GPU:" src\video_core\renderer_vulkan\vk_instance.cpp >nul || (echo [失败] v5 标记缺失：选卡日志 & goto :fail_popd)
+    findstr /C:"gpu_fell_back" src\video_core\renderer_vulkan\vk_instance.cpp >nul || (echo [失败] v5 标记缺失：回退标记 & goto :fail_popd)
+    echo ok > .patched-v5
+)
+echo [OK] 补丁全部就绪（v2 主补丁 + v3 遮挡查询补丁 + v4 Vulkan 默认优化 + v5 GPU 鲁棒选择）
 
 rem ---- CMake 配置 + 编译（VS 2022 生成器，自动并行）----
 if not exist build\CMakeCache.txt (
