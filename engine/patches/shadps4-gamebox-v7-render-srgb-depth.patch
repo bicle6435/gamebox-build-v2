@@ -200,16 +200,42 @@
      u64 ready_tick;
 --- a/src/video_core/renderer_vulkan/vk_presenter.cpp
 +++ b/src/video_core/renderer_vulkan/vk_presenter.cpp
-@@ -496,7 +496,16 @@
+@@ -468,6 +468,30 @@
+     }
+ }
+ 
++// GameBox v7: complete the sRGB output chain. The game's video-out image is
++// sampled through an sRGB view (hardware decodes to linear light) and FSR/PP
++// operate on linear values, but the frame image previously used the raw
++// swapchain (UNORM) format, so the linear data was stored without
++// re-encoding — the display then showed linear bytes as sRGB (a v^(1/2.2)
++// style curve), washing out bright scenes and flattening dark ones. The
++// post-process now renders into the sRGB sibling so the hardware re-encodes
++// on write, while the UI view keeps the swapchain format so ImGui samples
++// the raw encoded bytes and the swapchain receives them unchanged — the
++// whole chain becomes gamma-identity.
++[[nodiscard]] static vk::Format GetFrameAttachmentFormat(const vk::Format swapchain_format,
++                                                          const bool is_hdr) {
++    if (is_hdr) {
++        return swapchain_format;
++    }
++    if (swapchain_format == vk::Format::eR8G8B8A8Unorm) {
++        return vk::Format::eR8G8B8A8Srgb;
++    }
++    if (swapchain_format == vk::Format::eB8G8R8A8Unorm) {
++        return vk::Format::eB8G8R8A8Srgb;
++    }
++    return swapchain_format;
++}
++
+ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_)
+     : window{window_}, liverpool{liverpool_},
+       instance{window, EmulatorSettings.GetGpuId(), EmulatorSettings.IsVkValidationEnabled(),
+@@ -496,7 +520,11 @@
          static_cast<float>(EmulatorSettings.GetRcasAttenuation() / 1000.f);
  
      fsr_pass.Create(device, instance.GetAllocator(), num_images);
 -    pp_pass.Create(device, swapchain.GetSurfaceFormat().format);
-+    // GameBox v7.1: clang-cl (MSVC mode) enforces declaration-before-use;
-+    // the definition with full sRGB-chain rationale lives below, right
-+    // before Presenter::PrepareFrame.
-+    [[nodiscard]] static vk::Format GetFrameAttachmentFormat(
-+        const vk::Format swapchain_format, const bool is_hdr);
 +    // GameBox v7: the post-process pipeline must declare the format the frame
 +    // attachment actually uses (the sRGB sibling on SDR swapchains) or the
 +    // dynamic-rendering pipeline would disagree with the attachment view.
@@ -218,7 +244,7 @@
  
      ImGui::Layer::AddLayer(Common::Singleton<Core::Devtools::Layer>::Instance());
      ImGui::Friends::Register();
-@@ -521,6 +530,7 @@
+@@ -521,6 +549,7 @@
      for (auto& frame : present_frames) {
          vmaDestroyImage(instance.GetAllocator(), frame.image, frame.allocation);
          device.destroyImageView(frame.image_view);
@@ -226,7 +252,7 @@
          device.destroyFence(frame.present_done);
      }
  }
-@@ -537,15 +547,22 @@
+@@ -537,15 +566,22 @@
      if (frame->image_view) {
          device.destroyImageView(frame->image_view);
      }
@@ -250,7 +276,7 @@
          .extent = {width, height, 1},
          .mipLevels = 1,
          .arrayLayers = 1,
-@@ -579,7 +596,7 @@
+@@ -579,7 +615,7 @@
      const vk::ImageViewCreateInfo view_info = {
          .image = frame->image,
          .viewType = vk::ImageViewType::e2D,
@@ -259,7 +285,7 @@
          .subresourceRange{
              .aspectMask = vk::ImageAspectFlagBits::eColor,
              .baseMipLevel = 0,
-@@ -590,10 +607,27 @@
+@@ -590,10 +626,27 @@
      };
      auto view = Check<"create frame image view">(device.createImageView(view_info));
      frame->image_view = view;
@@ -288,37 +314,6 @@
      frame->is_hdr = swapchain.GetHDR();
  }
  
-@@ -669,6 +703,30 @@
-     return {};
- }
- 
-+// GameBox v7: complete the sRGB output chain. The game's video-out image is
-+// sampled through an sRGB view (hardware decodes to linear light) and FSR/PP
-+// operate on linear values, but the frame image previously used the raw
-+// swapchain (UNORM) format, so the linear data was stored without
-+// re-encoding — the display then showed linear bytes as sRGB (a v^(1/2.2)
-+// style curve), washing out bright scenes and flattening dark ones. The
-+// post-process now renders into the sRGB sibling so the hardware re-encodes
-+// on write, while the UI view keeps the swapchain format so ImGui samples
-+// the raw encoded bytes and the swapchain receives them unchanged — the
-+// whole chain becomes gamma-identity.
-+[[nodiscard]] static vk::Format GetFrameAttachmentFormat(const vk::Format swapchain_format,
-+                                                          const bool is_hdr) {
-+    if (is_hdr) {
-+        return swapchain_format;
-+    }
-+    if (swapchain_format == vk::Format::eR8G8B8A8Unorm) {
-+        return vk::Format::eR8G8B8A8Srgb;
-+    }
-+    if (swapchain_format == vk::Format::eB8G8R8A8Unorm) {
-+        return vk::Format::eB8G8R8A8Srgb;
-+    }
-+    return swapchain_format;
-+}
-+
- Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& attribute,
-                                VAddr cpu_address) {
-     auto desc = VideoCore::TextureCache::ImageDesc{attribute, cpu_address};
 --- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
 +++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
 @@ -1383,6 +1383,20 @@
