@@ -1,0 +1,344 @@
+--- a/src/video_core/renderer_vulkan/vk_instance.cpp
++++ b/src/video_core/renderer_vulkan/vk_instance.cpp
+@@ -831,35 +831,109 @@
+ 
+ vk::Format Instance::GetSupportedFormat(const vk::Format format,
+                                         const vk::FormatFeatureFlags2 flags) const {
+-    if (!IsFormatSupported(format, flags)) [[unlikely]] {
+-        switch (format) {
+-        case vk::Format::eD16UnormS8Uint: {
+-            // Common on NVIDIA (no D16S8 support at all) and old Intel. The
+-            // rasterizer depth-bias compensation relies on this fallback path.
+-            static bool s_d16s8_fallback_logged = false;
+-            if (!s_d16s8_fallback_logged) {
+-                s_d16s8_fallback_logged = true;
+-                LOG_INFO(Render_Vulkan,
+-                         "Format D16UnormS8Uint unsupported with required features: falling "
+-                         "back to a host-supported depth-stencil format");
+-            }
+-            if (IsFormatSupported(vk::Format::eD24UnormS8Uint, flags)) {
+-                return vk::Format::eD24UnormS8Uint;
+-            }
+-            if (IsFormatSupported(vk::Format::eD32SfloatS8Uint, flags)) {
+-                return vk::Format::eD32SfloatS8Uint;
+-            }
++    if (IsFormatSupported(format, flags)) {
++        return format;
++    }
++    // GameBox v7: comprehensive host-format fallback ladder (GTX 960M /
++    // Maxwell compatibility). The previous code only covered D16S8 and R8Srgb
++    // and, for every other format, silently returned a format the device does
++    // not support with the requested features — image/pipeline creation then
++    // ran on an unsupported format, which corrupts depth testing (see-through
++    // geometry, texture bleed-through) and color attachments.
++    vk::Format fallback = vk::Format::eUndefined;
++    switch (format) {
++    // ---- Depth/stencil: promote to a wider depth format ----
++    // Common on NVIDIA (no D16S8 support at all) and old Intel. The
++    // rasterizer depth-bias compensation relies on this fallback path.
++    // Wider formats only add precision, so promotion is safe.
++    case vk::Format::eD16UnormS8Uint:
++        if (IsFormatSupported(vk::Format::eD24UnormS8Uint, flags)) {
++            fallback = vk::Format::eD24UnormS8Uint;
+             break;
+         }
+-        case vk::Format::eR8Srgb:
+-            if (IsFormatSupported(vk::Format::eR8Unorm, flags)) {
+-                return vk::Format::eR8Unorm;
+-            }
++        if (IsFormatSupported(vk::Format::eD32SfloatS8Uint, flags)) {
++            fallback = vk::Format::eD32SfloatS8Uint;
++        }
++        break;
++    case vk::Format::eD16Unorm:
++        if (IsFormatSupported(vk::Format::eD24UnormS8Uint, flags)) {
++            fallback = vk::Format::eD24UnormS8Uint;
+             break;
+-        default:
++        }
++        if (IsFormatSupported(vk::Format::eD32SfloatS8Uint, flags)) {
++            fallback = vk::Format::eD32SfloatS8Uint;
+             break;
+         }
++        if (IsFormatSupported(vk::Format::eD32Sfloat, flags)) {
++            fallback = vk::Format::eD32Sfloat;
++        }
++        break;
++    case vk::Format::eD32Sfloat:
++        if (IsFormatSupported(vk::Format::eD32SfloatS8Uint, flags)) {
++            fallback = vk::Format::eD32SfloatS8Uint;
++        }
++        break;
++    // ---- sRGB view family: fall back to the unorm sibling ----
++    // When a driver lacks the sRGB view variant, the unorm sibling keeps the
++    // image usable (values are then interpreted linearly).
++    case vk::Format::eR8Srgb:
++        if (IsFormatSupported(vk::Format::eR8Unorm, flags)) {
++            fallback = vk::Format::eR8Unorm;
++        }
++        break;
++    case vk::Format::eR8G8Srgb:
++        if (IsFormatSupported(vk::Format::eR8G8Unorm, flags)) {
++            fallback = vk::Format::eR8G8Unorm;
++        }
++        break;
++    case vk::Format::eR8G8B8A8Srgb:
++        if (IsFormatSupported(vk::Format::eR8G8B8A8Unorm, flags)) {
++            fallback = vk::Format::eR8G8B8A8Unorm;
++        }
++        break;
++    case vk::Format::eB8G8R8A8Srgb:
++        if (IsFormatSupported(vk::Format::eB8G8R8A8Unorm, flags)) {
++            fallback = vk::Format::eB8G8R8A8Unorm;
++        }
++        break;
++    case vk::Format::eA8B8G8R8SrgbPack32:
++        if (IsFormatSupported(vk::Format::eA8B8G8R8UnormPack32, flags)) {
++            fallback = vk::Format::eA8B8G8R8UnormPack32;
++        }
++        break;
++    // ---- 10:10:10:2 packed color: Maxwell lacks some attachment combos ----
++    // The 16-bit-per-channel siblings keep the numeric range and signedness.
++    case vk::Format::eA2B10G10R10SnormPack32:
++    case vk::Format::eA2B10G10R10SscaledPack32:
++        if (IsFormatSupported(vk::Format::eR16G16B16A16Snorm, flags)) {
++            fallback = vk::Format::eR16G16B16A16Snorm;
++        }
++        break;
++    case vk::Format::eA2B10G10R10SintPack32:
++        if (IsFormatSupported(vk::Format::eR16G16B16A16Sint, flags)) {
++            fallback = vk::Format::eR16G16B16A16Sint;
++        }
++        break;
++    case vk::Format::eA2B10G10R10UintPack32:
++    case vk::Format::eA2B10G10R10UscaledPack32:
++        if (IsFormatSupported(vk::Format::eR16G16B16A16Uint, flags)) {
++            fallback = vk::Format::eR16G16B16A16Uint;
++        }
++        break;
++    default:
++        break;
++    }
++    if (fallback != vk::Format::eUndefined) [[unlikely]] {
++        LOG_INFO(Render_Vulkan,
++                 "Host format fallback: {} is not supported with the requested features; "
++                 "using {} instead",
++                 vk::to_string(format), vk::to_string(fallback));
++        return fallback;
+     }
++    LOG_WARNING(Render_Vulkan,
++                "Format {} is not supported with the requested features on this device and "
++                "has no safe substitute; keeping the format as-is",
++                vk::to_string(format));
+     return format;
+ }
+ 
+
+--- a/src/video_core/renderer_vulkan/vk_instance.h
++++ b/src/video_core/renderer_vulkan/vk_instance.h
+@@ -29,6 +29,21 @@
+     /// Returns a formatted string for the driver version
+     std::string GetDriverVersionName();
+ 
++    // GameBox v7: canonical format feature sets used by the texture cache when
++    // it creates images (see image.cpp ImageUsageFlags / FormatFeatureFlags).
++    // Pipelines must resolve their declared attachment formats with the same
++    // sets so the pipeline format and the actual image format can never
++    // disagree — a mismatch silently breaks depth testing on drivers with
++    // partial format support (e.g. D16S8 on Maxwell).
++    static constexpr vk::FormatFeatureFlags2 kDepthImageFeatures =
++        vk::FormatFeatureFlagBits2::eDepthStencilAttachment |
++        vk::FormatFeatureFlagBits2::eSampledImage |
++        vk::FormatFeatureFlagBits2::eTransferSrc | vk::FormatFeatureFlagBits2::eTransferDst;
++    static constexpr vk::FormatFeatureFlags2 kColorImageFeatures =
++        vk::FormatFeatureFlagBits2::eColorAttachment |
++        vk::FormatFeatureFlagBits2::eSampledImage |
++        vk::FormatFeatureFlagBits2::eTransferSrc | vk::FormatFeatureFlagBits2::eTransferDst;
++
+     /// Gets a compatibility format if the format is not supported.
+     [[nodiscard]] vk::Format GetSupportedFormat(vk::Format format,
+                                                 vk::FormatFeatureFlags2 flags) const;
+
+--- a/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
++++ b/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
+@@ -244,15 +244,21 @@
+         });
+     }
+ 
+-    const auto depth_format =
+-        instance.GetSupportedFormat(LiverpoolToVK::DepthFormat(key.z_format, key.stencil_format),
+-                                    vk::FormatFeatureFlagBits2::eDepthStencilAttachment);
++    // GameBox v7: resolve with the texture cache's canonical depth feature set
++    // (attachment + sampled + transfer) so the pipeline's declared depth format
++    // always matches the format the depth image was actually created with. The
++    // old attachment-only query could disagree with the image-side fallback on
++    // drivers with partial D16S8 support, silently corrupting depth testing
++    // (see-through map geometry, decal/light bleed-through).
++    const auto depth_format = instance.GetSupportedFormat(
++        LiverpoolToVK::DepthFormat(key.z_format, key.stencil_format),
++        Vulkan::Instance::kDepthImageFeatures);
+     std::array<vk::Format, Shader::IR::NumRenderTargets> color_formats;
+     for (s32 i = 0; i < key.num_color_attachments; ++i) {
+         const auto& col_buf = key.color_buffers[i];
+         const auto format = LiverpoolToVK::SurfaceFormat(col_buf.data_format, col_buf.num_format);
+-        const auto color_format =
+-            instance.GetSupportedFormat(format, vk::FormatFeatureFlagBits2::eColorAttachment);
++        const auto color_format = instance.GetSupportedFormat(format,
++                                                              Instance::kColorImageFeatures);
+         if (!instance.IsFormatSupported(color_format,
+                                         vk::FormatFeatureFlagBits2::eColorAttachment)) {
+             LOG_WARNING(Render_Vulkan,
+
+--- a/src/video_core/renderer_vulkan/vk_presenter.h
++++ b/src/video_core/renderer_vulkan/vk_presenter.h
+@@ -30,6 +30,9 @@
+     VmaAllocation allocation;
+     vk::Image image;
+     vk::ImageView image_view;
++    // GameBox v7: UI sampling view — deliberately the swapchain (UNORM) format
++    // while image_view uses the sRGB sibling for the post-process attachment.
++    vk::ImageView ui_view;
+     vk::Fence present_done;
+     vk::Semaphore ready_semaphore;
+     u64 ready_tick;
+
+--- a/src/video_core/renderer_vulkan/vk_presenter.cpp
++++ b/src/video_core/renderer_vulkan/vk_presenter.cpp
+@@ -496,7 +496,11 @@
+         static_cast<float>(EmulatorSettings.GetRcasAttenuation() / 1000.f);
+ 
+     fsr_pass.Create(device, instance.GetAllocator(), num_images);
+-    pp_pass.Create(device, swapchain.GetSurfaceFormat().format);
++    // GameBox v7: the post-process pipeline must declare the format the frame
++    // attachment actually uses (the sRGB sibling on SDR swapchains) or the
++    // dynamic-rendering pipeline would disagree with the attachment view.
++    pp_pass.Create(device, GetFrameAttachmentFormat(swapchain.GetSurfaceFormat().format,
++                                                    swapchain.GetHDR()));
+ 
+     ImGui::Layer::AddLayer(Common::Singleton<Core::Devtools::Layer>::Instance());
+     ImGui::Friends::Register();
+@@ -521,6 +525,7 @@
+     for (auto& frame : present_frames) {
+         vmaDestroyImage(instance.GetAllocator(), frame.image, frame.allocation);
+         device.destroyImageView(frame.image_view);
++        device.destroyImageView(frame.ui_view);
+         device.destroyFence(frame.present_done);
+     }
+ }
+@@ -537,15 +542,22 @@
+     if (frame->image_view) {
+         device.destroyImageView(frame->image_view);
+     }
++    if (frame->ui_view) {
++        device.destroyImageView(frame->ui_view);
++    }
+     if (frame->image) {
+         vmaDestroyImage(instance.GetAllocator(), frame->image, frame->allocation);
+     }
+ 
+     const vk::Format format = swapchain.GetSurfaceFormat().format;
++    // GameBox v7: the frame image is rendered by the post-process pass in
++    // linear light; store through the sRGB sibling so the hardware re-encodes
++    // on write (see GetFrameAttachmentFormat).
++    const vk::Format frame_format = GetFrameAttachmentFormat(format, swapchain.GetHDR());
+     const vk::ImageCreateInfo image_info = {
+         .flags = vk::ImageCreateFlagBits::eMutableFormat,
+         .imageType = vk::ImageType::e2D,
+-        .format = format,
++        .format = frame_format,
+         .extent = {width, height, 1},
+         .mipLevels = 1,
+         .arrayLayers = 1,
+@@ -579,7 +591,7 @@
+     const vk::ImageViewCreateInfo view_info = {
+         .image = frame->image,
+         .viewType = vk::ImageViewType::e2D,
+-        .format = format,
++        .format = frame_format,
+         .subresourceRange{
+             .aspectMask = vk::ImageAspectFlagBits::eColor,
+             .baseMipLevel = 0,
+@@ -590,10 +602,27 @@
+     };
+     auto view = Check<"create frame image view">(device.createImageView(view_info));
+     frame->image_view = view;
++    // GameBox v7: UNORM view for the UI pass — samples the raw sRGB-encoded
++    // bytes (sRGB/UNORM pair reinterpretation; the image's mutable-format flag
++    // covers it regardless).
++    const vk::ImageViewCreateInfo ui_view_info = {
++        .image = frame->image,
++        .viewType = vk::ImageViewType::e2D,
++        .format = format,
++        .subresourceRange{
++            .aspectMask = vk::ImageAspectFlagBits::eColor,
++            .baseMipLevel = 0,
++            .levelCount = 1,
++            .baseArrayLayer = 0,
++            .layerCount = 1,
++        },
++    };
++    frame->ui_view = Check<"create frame UI view">(device.createImageView(ui_view_info));
+     frame->width = width;
+     frame->height = height;
+ 
+-    frame->imgui_texture = ImGui::Vulkan::AddTexture(view, vk::ImageLayout::eShaderReadOnlyOptimal);
++    frame->imgui_texture =
++        ImGui::Vulkan::AddTexture(frame->ui_view, vk::ImageLayout::eShaderReadOnlyOptimal);
+     frame->is_hdr = swapchain.GetHDR();
+ }
+ 
+@@ -669,6 +698,30 @@
+     return {};
+ }
+ 
++// GameBox v7: complete the sRGB output chain. The game's video-out image is
++// sampled through an sRGB view (hardware decodes to linear light) and FSR/PP
++// operate on linear values, but the frame image previously used the raw
++// swapchain (UNORM) format, so the linear data was stored without
++// re-encoding — the display then showed linear bytes as sRGB (a v^(1/2.2)
++// style curve), washing out bright scenes and flattening dark ones. The
++// post-process now renders into the sRGB sibling so the hardware re-encodes
++// on write, while the UI view keeps the swapchain format so ImGui samples
++// the raw encoded bytes and the swapchain receives them unchanged — the
++// whole chain becomes gamma-identity.
++[[nodiscard]] static vk::Format GetFrameAttachmentFormat(const vk::Format swapchain_format,
++                                                          const bool is_hdr) {
++    if (is_hdr) {
++        return swapchain_format;
++    }
++    if (swapchain_format == vk::Format::eR8G8B8A8Unorm) {
++        return vk::Format::eR8G8B8A8Srgb;
++    }
++    if (swapchain_format == vk::Format::eB8G8R8A8Unorm) {
++        return vk::Format::eB8G8R8A8Srgb;
++    }
++    return swapchain_format;
++}
++
+ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& attribute,
+                                VAddr cpu_address) {
+     auto desc = VideoCore::TextureCache::ImageDesc{attribute, cpu_address};
+
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -1383,6 +1383,20 @@
+     const auto depth_bias_enabled = regs.polygon_control.NeedsBias();
+     dynamic_state.SetDepthBiasEnabled(depth_bias_enabled);
+     if (depth_bias_enabled) {
++        // GameBox v7: one-shot diagnostic. Decal / projected-light issues on a
++        // given driver are usually a polygon-offset translation problem; this
++        // makes the raw register set visible in the log for first-use
++        // diagnosis (the values below are pre-rescale guest registers).
++        static bool poly_offset_logged = false;
++        if (!poly_offset_logged) [[unlikely]] {
++            poly_offset_logged = true;
++            LOG_INFO(Render_Vulkan,
++                     "Polygon offset in use: front_scale={} front_offset={} back_scale={} "
++                     "back_offset={} clamp={}",
++                     regs.poly_offset.front_scale, regs.poly_offset.front_offset,
++                     regs.poly_offset.back_scale, regs.poly_offset.back_offset,
++                     regs.poly_offset.depth_bias);
++        }
+         const bool front = regs.polygon_control.enable_polygon_offset_front;
+         float depth_bias_offset =
+             front ? regs.poly_offset.front_offset : regs.poly_offset.back_offset;
