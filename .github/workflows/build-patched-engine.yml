@@ -1,10 +1,31 @@
-# GameBox v5.1 — shadPS4 渲染修复增强补丁 v2+v3+v4+v5 引擎 CI 云端构建（v5.1）
+# GameBox v6.0 — shadPS4 渲染修复增强补丁 v2+v3+v4+v5+v6 引擎 CI 云端构建（v6.0）
+#
+# ─────────────────────────────────────────────────────────────────────
+# v6.0 新增（2026-10-07）：管线缓存防崩补丁 ——【0x80000003 断言中止 · 归档重复条目根因修复】
+#
+# 用户引擎日志实证（vulkan错误日志.txt）：
+#   [Render.Vulkan] LoadPipelineStage: Cached permutation 5 of vs_c145b4b2
+#                    conflicts with index 0, skipping preload
+#   [Debug] <Critical> vk_pipeline_serialization.cpp:238 LoadGraphicsPipeline:
+#                    Assertion Failed!
+#   → 进程退出码 2147483651(0x80000003)，游戏闪退打不开。
+#
+# 根因（归档解析实证）：pipelineCacheArchive=true → 引擎读 user/cache/
+# CUSA15006.zip。实测该归档含 1468 个条目，其中 446 组【同名重复条目】
+# （多引擎世代共写/追加写档不查重）。WarmUp() 的 ForEachBlob 遍历全部
+# 条目（不查重名）→ 同一 graphics_key 反序列化两次 → try_emplace 命中
+# 已有键 → ASSERT(is_new) 失败 → abort() → 0x80000003。
+#
+# 新增 shadps4-gamebox-v6-cache-safety.patch（1 文件 56 行）：
+#   LoadGraphicsPipeline / LoadComputePipeline 的 ASSERT(is_new) →
+#   LOG_WARNING + 跳过重复条目（运行时按需重编，缓存损坏永不中止进程）。
+# 与前端 v6.0 缓存体检自愈（归档去重重建）双保险。
 #
 # 用法（详见包内「先看我-GitHub云编译三步搞定-v4.txt」）：
 #   1. 把 .github / engine / build-engine 三个文件夹原样拖进一个 GitHub 仓库
 #      （替换旧版同名文件夹/同名文件；删除旧版 engine/patches/single-files 也行）
 #   2. Actions 页面 → build-patched-engine → Run workflow（手动触发）
-#   3. 约 1~1.5 小时后在运行页 Artifacts 下载 shadPS4-415907b-patched-v5
+#   3. 约 1~1.5 小时后在运行页 Artifacts 下载 shadPS4-415907b-patched-v6
 #
 # ─────────────────────────────────────────────────────────────────────
 # v5.1 新增（2026-10-06）：GPU 鲁棒选择补丁 ——【游戏闪退打不开 · 0x80000003 根因修复】
@@ -223,7 +244,7 @@ jobs:
           if (-not (Test-Path 'src\shadps4-sifac4k-main\CMakeLists.txt')) { throw '解压后未找到 src\shadps4-sifac4k-main\CMakeLists.txt（源码包不完整）' }
           Write-Host '[OK] 源码解压完成'
 
-      - name: 应用渲染修复主补丁（v2+v3+v4+v5，v2.1 防弹应用）
+      - name: 应用渲染修复主补丁（v2+v3+v4+v5+v6，v2.1 防弹应用）
         shell: bash
         run: |
           set -e
@@ -272,6 +293,11 @@ jobs:
           grep -q 'Using GPU:' src/video_core/renderer_vulkan/vk_instance.cpp || { echo '[失败] 标记缺失: v5 选卡日志'; exit 1; }
           grep -q 'is out of range' src/video_core/renderer_vulkan/vk_instance.cpp || { echo '[失败] 标记缺失: v5 越界钳制'; exit 1; }
           echo "[OK] v5 GPU 鲁棒选择补丁应用成功（核显断言 0x80000003 根治 + Using GPU 日志）"
+          # v6.0【管线缓存防崩】：0x80000003 断言中止根因修复（归档重复条目）
+          apply_patch "$GITHUB_WORKSPACE/engine/patches/shadps4-gamebox-v6-cache-safety.patch"
+          grep -q 'Duplicate graphics pipeline entry' src/video_core/renderer_vulkan/vk_pipeline_serialization.cpp || { echo '[失败] 标记缺失: v6 图形管线重复跳过'; exit 1; }
+          grep -q 'Duplicate compute pipeline entry' src/video_core/renderer_vulkan/vk_pipeline_serialization.cpp || { echo '[失败] 标记缺失: v6 计算管线重复跳过'; exit 1; }
+          echo "[OK] v6 管线缓存防崩补丁应用成功（0x80000003 根治：缓存重复条目优雅跳过）"
 
       - name: 恢复子模块并锁定版本（45 + 4 嵌套，v2.3 锁定版）
         shell: bash
@@ -483,6 +509,6 @@ jobs:
         # v5.0.0 仍是 node20，升级时请直接跳到 v6）
         uses: actions/upload-artifact@v6.0.0
         with:
-          name: shadPS4-415907b-patched-v5
+          name: shadPS4-415907b-patched-v6
           path: artifact/
           retention-days: 90
