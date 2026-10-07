@@ -133,7 +133,6 @@
      return format;
  }
  
-
 --- a/src/video_core/renderer_vulkan/vk_instance.h
 +++ b/src/video_core/renderer_vulkan/vk_instance.h
 @@ -29,6 +29,21 @@
@@ -158,7 +157,6 @@
      /// Gets a compatibility format if the format is not supported.
      [[nodiscard]] vk::Format GetSupportedFormat(vk::Format format,
                                                  vk::FormatFeatureFlags2 flags) const;
-
 --- a/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
 +++ b/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
 @@ -244,15 +244,21 @@
@@ -188,7 +186,6 @@
          if (!instance.IsFormatSupported(color_format,
                                          vk::FormatFeatureFlagBits2::eColorAttachment)) {
              LOG_WARNING(Render_Vulkan,
-
 --- a/src/video_core/renderer_vulkan/vk_presenter.h
 +++ b/src/video_core/renderer_vulkan/vk_presenter.h
 @@ -30,6 +30,9 @@
@@ -201,14 +198,18 @@
      vk::Fence present_done;
      vk::Semaphore ready_semaphore;
      u64 ready_tick;
-
 --- a/src/video_core/renderer_vulkan/vk_presenter.cpp
 +++ b/src/video_core/renderer_vulkan/vk_presenter.cpp
-@@ -496,7 +496,11 @@
+@@ -496,7 +496,16 @@
          static_cast<float>(EmulatorSettings.GetRcasAttenuation() / 1000.f);
  
      fsr_pass.Create(device, instance.GetAllocator(), num_images);
 -    pp_pass.Create(device, swapchain.GetSurfaceFormat().format);
++    // GameBox v7.1: clang-cl (MSVC mode) enforces declaration-before-use;
++    // the definition with full sRGB-chain rationale lives below, right
++    // before Presenter::PrepareFrame.
++    [[nodiscard]] static vk::Format GetFrameAttachmentFormat(
++        const vk::Format swapchain_format, const bool is_hdr);
 +    // GameBox v7: the post-process pipeline must declare the format the frame
 +    // attachment actually uses (the sRGB sibling on SDR swapchains) or the
 +    // dynamic-rendering pipeline would disagree with the attachment view.
@@ -217,7 +218,7 @@
  
      ImGui::Layer::AddLayer(Common::Singleton<Core::Devtools::Layer>::Instance());
      ImGui::Friends::Register();
-@@ -521,6 +525,7 @@
+@@ -521,6 +530,7 @@
      for (auto& frame : present_frames) {
          vmaDestroyImage(instance.GetAllocator(), frame.image, frame.allocation);
          device.destroyImageView(frame.image_view);
@@ -225,7 +226,7 @@
          device.destroyFence(frame.present_done);
      }
  }
-@@ -537,15 +542,22 @@
+@@ -537,15 +547,22 @@
      if (frame->image_view) {
          device.destroyImageView(frame->image_view);
      }
@@ -249,7 +250,7 @@
          .extent = {width, height, 1},
          .mipLevels = 1,
          .arrayLayers = 1,
-@@ -579,7 +591,7 @@
+@@ -579,7 +596,7 @@
      const vk::ImageViewCreateInfo view_info = {
          .image = frame->image,
          .viewType = vk::ImageViewType::e2D,
@@ -258,7 +259,7 @@
          .subresourceRange{
              .aspectMask = vk::ImageAspectFlagBits::eColor,
              .baseMipLevel = 0,
-@@ -590,10 +602,27 @@
+@@ -590,10 +607,27 @@
      };
      auto view = Check<"create frame image view">(device.createImageView(view_info));
      frame->image_view = view;
@@ -287,7 +288,7 @@
      frame->is_hdr = swapchain.GetHDR();
  }
  
-@@ -669,6 +698,30 @@
+@@ -669,6 +703,30 @@
      return {};
  }
  
@@ -318,7 +319,6 @@
  Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& attribute,
                                 VAddr cpu_address) {
      auto desc = VideoCore::TextureCache::ImageDesc{attribute, cpu_address};
-
 --- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
 +++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
 @@ -1383,6 +1383,20 @@
