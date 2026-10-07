@@ -1,6 +1,38 @@
-# GameBox v6.0 — shadPS4 渲染修复增强补丁 v2+v3+v4+v5+v6 引擎 CI 云端构建（v6.0）
+# GameBox v7.0 — shadPS4 渲染修复增强补丁 v2~v7 引擎 CI 云端构建（v7.0）
 #
 # ─────────────────────────────────────────────────────────────────────
+# v7.0 新增（2026-10-07）：三项渲染问题引擎侧根治（误报根治在前端完整包）
+#
+# 新增 shadps4-gamebox-v7-render-srgb-depth.patch（6 文件 344 行）：
+#   ① 宿主格式回退阶梯补全（vk_instance.cpp GetSupportedFormat）：
+#      旧代码只处理 D16S8/R8Srgb 两种回退，其余格式（D16 无模板、sRGB
+#      视图家族、A2B10G10R10 家族）缺支持时【静默返回不支持格式】→
+#      深度测试/颜色附件渲染损坏。v7 补全全部阶梯 + 回退可见日志。
+#   ② 管线深度/颜色格式一致性（vk_graphics_pipeline.cpp）：
+#      管线旧查询只用 eDepthStencilAttachment 旗标，纹理缓存建图用完整
+#      旗标集（附件+采样+传输）——驱动部分支持 D16S8 时两边回退决策
+#      不一致 → 管线格式 ≠ 图像格式 → 深度测试静默损坏（地图透明、
+#      贴图重叠、绿光投射贴图常显的根因）。v7 统一为同一特性集。
+#   ③ sRGB 输出链补全（vk_presenter.cpp/h，A8B8G8R8Srgb 输出链）：
+#      游戏画面经 sRGB 视图解码为线性光 → FSR/PP 线性处理 → 旧代码
+#      原样写进 UNORM frame（【丢失再编码】）→ 显示器把线性字节当
+#      sRGB 显示（≈v^0.92 曲线）→ 白天发白、夜晚发灰。v7 把 frame
+#      附件改为 sRGB 兄弟格式（硬件写入自动编码），UI 视图保持 UNORM
+#      原样直通 → 整条链 gamma 恒等。
+#   ④ 多边形偏移一次性诊断日志（vk_rasterizer.cpp）：绿光贴图/贴花
+#      类问题首用即打印 GCN 偏移寄存器组，后续诊断有据可依。
+#
+# 用户日志实证（user.zip 解析）：GTX 960M + Vulkan 1.4.312，
+# D16UnormS8Uint 缺 DepthStencilAttachment、A2B10G10R10/R8Srgb 不完整。
+#
+# 用法（三步不变）：
+#   1. 把 .github / engine / build-engine 三个文件夹原样拖进 GitHub 仓库
+#   2. Actions 页面 → build-patched-engine → Run workflow（手动触发）
+#   3. 约 1~1.5 小时后在运行页 Artifacts 下载 shadPS4-415907b-patched-v7
+#
+# ─────────────────────────────────────────────────────────────────────
+#（以下为 v6.0 及更早的历史注释，保留备查）
+## ─────────────────────────────────────────────────────────────────────
 # v6.0 新增（2026-10-07）：管线缓存防崩补丁 ——【0x80000003 断言中止 · 归档重复条目根因修复】
 #
 # 用户引擎日志实证（vulkan错误日志.txt）：
@@ -244,7 +276,7 @@ jobs:
           if (-not (Test-Path 'src\shadps4-sifac4k-main\CMakeLists.txt')) { throw '解压后未找到 src\shadps4-sifac4k-main\CMakeLists.txt（源码包不完整）' }
           Write-Host '[OK] 源码解压完成'
 
-      - name: 应用渲染修复主补丁（v2+v3+v4+v5+v6，v2.1 防弹应用）
+      - name: 应用渲染修复主补丁（v2+v3+v4+v5+v6+v7，v2.1 防弹应用）
         shell: bash
         run: |
           set -e
@@ -298,6 +330,16 @@ jobs:
           grep -q 'Duplicate graphics pipeline entry' src/video_core/renderer_vulkan/vk_pipeline_serialization.cpp || { echo '[失败] 标记缺失: v6 图形管线重复跳过'; exit 1; }
           grep -q 'Duplicate compute pipeline entry' src/video_core/renderer_vulkan/vk_pipeline_serialization.cpp || { echo '[失败] 标记缺失: v6 计算管线重复跳过'; exit 1; }
           echo "[OK] v6 管线缓存防崩补丁应用成功（0x80000003 根治：缓存重复条目优雅跳过）"
+
+          # ---- v7.0：三项渲染问题根治（格式回退阶梯 / 管线一致性 / sRGB 输出链）----
+          apply_patch "$GITHUB_WORKSPACE/engine/patches/shadps4-gamebox-v7-render-srgb-depth.patch"
+          grep -q 'Host format fallback' src/video_core/renderer_vulkan/vk_instance.cpp || { echo '[失败] 标记缺失: v7 格式回退阶梯'; exit 1; }
+          grep -q 'kDepthImageFeatures' src/video_core/renderer_vulkan/vk_instance.h || { echo '[失败] 标记缺失: v7 特性集常量'; exit 1; }
+          grep -q 'kColorImageFeatures' src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp || { echo '[失败] 标记缺失: v7 管线格式一致性'; exit 1; }
+          grep -q 'GetFrameAttachmentFormat' src/video_core/renderer_vulkan/vk_presenter.cpp || { echo '[失败] 标记缺失: v7 sRGB 输出链'; exit 1; }
+          grep -q 'ui_view' src/video_core/renderer_vulkan/vk_presenter.h || { echo '[失败] 标记缺失: v7 UI 视图'; exit 1; }
+          grep -q 'Polygon offset in use' src/video_core/renderer_vulkan/vk_rasterizer.cpp || { echo '[失败] 标记缺失: v7 偏移诊断'; exit 1; }
+          echo "[OK] v7 渲染根治补丁应用成功（D16S8 回退阶梯 + 管线格式一致性 + sRGB 输出链 + 偏移诊断）"
 
       - name: 恢复子模块并锁定版本（45 + 4 嵌套，v2.3 锁定版）
         shell: bash
@@ -499,6 +541,8 @@ jobs:
           if (-not $exe) { throw '未找到编译产物 shadps4.exe' }
           # v3: 产物名对齐 GameBox 前端体检页检测逻辑（无 -v2 后缀）
           Copy-Item $exe.FullName 'artifact\shadPS4-415907b-patched.exe'
+          Copy-Item 'engine\patches\修复补丁说明-v7.md' 'artifact\' -ErrorAction SilentlyContinue
+          Copy-Item 'engine\patches\装回说明-v7.txt' 'artifact\' -ErrorAction SilentlyContinue
           Copy-Item 'engine\patches\修复补丁说明-v5.md' 'artifact\' -ErrorAction SilentlyContinue
           Copy-Item 'engine\patches\装回说明-v5.txt' 'artifact\' -ErrorAction SilentlyContinue
           Write-Host ("[OK] 产物：{0}（{1:N1} MB）" -f $exe.FullName, ($exe.Length/1MB))
@@ -509,6 +553,6 @@ jobs:
         # v5.0.0 仍是 node20，升级时请直接跳到 v6）
         uses: actions/upload-artifact@v6.0.0
         with:
-          name: shadPS4-415907b-patched-v6
+          name: shadPS4-415907b-patched-v7
           path: artifact/
           retention-days: 90
