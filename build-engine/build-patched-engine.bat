@@ -100,7 +100,17 @@ if exist .patched-v5 (
     findstr /C:"gpu_fell_back" src\video_core\renderer_vulkan\vk_instance.cpp >nul || (echo [失败] v5 标记缺失：回退标记 & goto :fail_popd)
     echo ok > .patched-v5
 )
-echo [OK] 补丁全部就绪（v2 主补丁 + v3 遮挡查询补丁 + v4 Vulkan 默认优化 + v5 GPU 鲁棒选择）
+if exist .patched-v6 (
+    echo [OK] v6 管线缓存防崩补丁已应用，跳过
+) else (
+    echo 正在应用 v6 管线缓存防崩补丁（1 文件 56 行：0x80000003 断言中止根因修复）……
+    git apply --check --ignore-whitespace "..\..\engine\patches\shadps4-gamebox-v6-cache-safety.patch" || goto :fail_popd
+    git apply --ignore-whitespace "..\..\engine\patches\shadps4-gamebox-v6-cache-safety.patch" || goto :fail_popd
+    findstr /C:"Duplicate graphics pipeline entry" src\video_core\renderer_vulkan\vk_pipeline_serialization.cpp >nul || (echo [失败] v6 标记缺失：图形管线重复跳过 & goto :fail_popd)
+    findstr /C:"Duplicate compute pipeline entry" src\video_core\renderer_vulkan\vk_pipeline_serialization.cpp >nul || (echo [失败] v6 标记缺失：计算管线重复跳过 & goto :fail_popd)
+    echo ok > .patched-v6
+)
+echo [OK] 补丁全部就绪（v2 主补丁 + v3 遮挡查询补丁 + v4 Vulkan 默认优化 + v5 GPU 鲁棒选择 + v6 管线缓存防崩）
 
 rem ---- CMake 配置 + 编译（VS 2022 生成器，自动并行）----
 if not exist build\CMakeCache.txt (

@@ -1,0 +1,56 @@
+diff --git a/src/video_core/renderer_vulkan/vk_pipeline_serialization.cpp b/src/video_core/renderer_vulkan/vk_pipeline_serialization.cpp
+index a7ad7c5..3b4f60e 100644
+--- a/src/video_core/renderer_vulkan/vk_pipeline_serialization.cpp
++++ b/src/video_core/renderer_vulkan/vk_pipeline_serialization.cpp
+@@ -159,8 +159,23 @@ bool PipelineCache::LoadComputePipeline(Serialization::Archive& ar) {
+         return false;
+     }
+ 
++    // GameBox v6【管线缓存防崩】：
++    // 原实现 ASSERT(is_new) —— 归档缓存（<GAMEID>.zip）一旦出现同名重复条目
++    // （多引擎世代共写、追加写档不查重），ForEachBlob 会把同一 compute_key
++    // 反序列化两次，第二次 try_emplace 命中已有键 → 断言中止整个进程
++    // （退出码 0x80000003，游戏直接闪退）。缓存只是加速器，数据损坏永远
++    // 不该中止模拟器：改为记录警告并丢弃该条（运行时按需重编）。
+     const auto [it, is_new] = compute_pipelines.try_emplace(compute_key);
+-    ASSERT(is_new);
++    if (!is_new) [[unlikely]] {
++        LOG_WARNING(Render_Vulkan,
++                    "Duplicate compute pipeline entry in cache (key {:#018x}) - "
++                    "the archive holds entries from more than one cache generation. "
++                    "Skipping the duplicate; it will recompile at runtime.",
++                    compute_key.value);
++        infos.fill(nullptr);
++        modules.fill(nullptr);
++        return false;
++    }
+ 
+     it.value() =
+         std::make_unique<ComputePipeline>(instance, scheduler, desc_heap, profile, *pipeline_cache,
+@@ -234,8 +249,25 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
+         }
+     }
+ 
++    // GameBox v6【管线缓存防崩 · 0x80000003 根因修复】：
++    // 用户实测崩溃链：WarmUp() → ForEachBlob 遍历归档内全部 .key 条目（含
++    // 同名重复条目）→ 同一 graphics_key 装载两次 → try_emplace 命中已有键
++    // → ASSERT(is_new) 失败 → abort() → 进程退出码 2147483651(0x80000003)。
++    // 伴随日志特征："Cached permutation N of vs_xxx conflicts with index 0"。
++    // 缓存任何损坏/混杂状态都降级为跳过重编，绝不中止进程。
+     const auto [it, is_new] = graphics_pipelines.try_emplace(graphics_key);
+-    ASSERT(is_new);
++    if (!is_new) [[unlikely]] {
++        LOG_WARNING(Render_Vulkan,
++                    "Duplicate graphics pipeline entry in cache (hash {:#018x}) - "
++                    "the store holds entries from more than one cache generation "
++                    "(mixed engine builds or an appended archive). Skipping the "
++                    "duplicate; it will recompile at runtime.",
++                    XXH3_64bits(&graphics_key, sizeof(graphics_key)));
++        infos.fill(nullptr);
++        modules.fill(nullptr);
++        fetch_shader.reset();
++        return false;
++    }
+ 
+     it.value() = std::make_unique<GraphicsPipeline>(
+         instance, scheduler, desc_heap, profile, graphics_key, *pipeline_cache, infos,
