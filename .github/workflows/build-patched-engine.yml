@@ -1,5 +1,26 @@
-# GameBox v8.1 — shadPS4 渲染修复补丁 v2~v8.1 引擎 CI 云端构建（修复包2 · 含 MD5 预检）
+# GameBox v8.2 — shadPS4 渲染修复补丁 v2~v8.1 引擎 CI 云端构建（修复包4 · 终极版）
 
+#
+# ============================================================
+# v8.2.1（2026-10-27 修复包4 · 终极版）：
+#   预检修复逻辑与修复包3 的 v8.2 完全一致（7 场景验收全绿，零逻辑改动），
+#   本版只做两件整理：
+#   1. 红框报错文案 修复包3→修复包4（报错时指引指向本包，不再指向旧包）
+#   2. 修复包结构去重复：取消历史「镜像保险位」，一个文件只放一处，
+#      以 仓库根标准结构 为准（.github/workflows + engine/patches）。
+#      仓库根的 engine/patches/ 是唯一有效位置，workflow 只读这一处。
+#
+# v8.2（2026-10-27 修复包3）：修复 v8.1 预检的 md5sum 反斜杠误报
+#   Windows runner 上 $GITHUB_WORKSPACE 是 D:\a\… 反斜杠路径，GNU md5sum
+#   对含反斜杠的路径输出转义格式（哈希前多一个 \ 前缀），v8.1 预检的
+#   awk '{print $1}' 把前缀当 MD5 的一部分——8 个补丁全对也 30 秒误报红。
+#   2026-10-27 12:49 第二次红灯实锤即此（你的仓库文件零责任，全对）。
+#   双保险修复：A) ws="${GITHUB_WORKSPACE//\\//}" 路径反斜杠归一化（根治）
+#              B) got="${got#\\}" 解析后剥前导反斜杠（兜底）。
+#   修复验收 7 场景全绿（Linux 字面反斜杠仿真树忠实复刻 Git Bash 行为）：
+#   S1 旧代码复现误报 → S2 新代码 Windows 仿真 8×[OK] → S3 兜底剥离生效
+#   → S4/S5 常规路径回归绿 → S6 真错件仍拦截 → S7 缺件仍提示。
+# ============================================================
 #
 # ============================================================
 # v8.1（2026-10-27 修复包2）：CI 红灯根因修复 + 补丁版本预检
@@ -304,29 +325,36 @@ jobs:
           }
           Write-Host '[OK] 文件结构正确'
 
-      - name: 补丁文件 MD5 预检（v8.1 新增：30 秒内识别补丁版本不对，不再等 50 分钟后的谜语报错）
+      - name: 补丁文件 MD5 预检（v8.2：30 秒识别补丁版本不对；修复 Windows 反斜杠路径导致的哈希误报）
         shell: bash
         run: |
           set -e
-          pdir="$GITHUB_WORKSPACE/engine/patches"
+          # v8.2 修复：Windows runner 的 $GITHUB_WORKSPACE 是 D:\a\... 反斜杠路径，
+          # GNU md5sum 遇到含反斜杠的文件名会输出转义格式（哈希值前面多一个 \ 前缀），
+          # 导致 awk 取到的"MD5"带着反斜杠——文件全对也误报红（v8.1 实际翻车原因）。
+          # 双保险：A) 路径里的反斜杠统一成正斜杠（根治）；B) 解析后再剥前导反斜杠（兜底）。
+          # 注意：下面这行在文件里必须是两个反斜杠（bash 模式中 \\ = 匹配一个字面反斜杠）
+          ws="${GITHUB_WORKSPACE//\\//}"
+          pdir="$ws/engine/patches"
           check_md5() {
             local f="$1" want="$2" got
             if [ ! -f "$pdir/$f" ]; then
-              echo "[缺] engine/patches/$f 不存在——把修复包2里的同名文件补传上来"
+              echo "[缺] engine/patches/$f 不存在——把修复包4里的同名文件补传上来"
               exit 1
             fi
             got=$(md5sum "$pdir/$f" | awk '{print $1}')
+            got="${got#\\}"
             if [ "$got" = "$want" ]; then
               echo "[OK] $f  $got"
               return 0
             fi
             echo ""
             echo "=================================================================="
-            echo "[红] 补丁版本不对（v8.1 预检拦截，这不用等编译就定位了）"
+            echo "[红] 补丁版本不对（v8.2 预检拦截，这不用等编译就定位了）"
             echo "  文件     : engine/patches/$f"
             echo "  期望 MD5 : $want"
             echo "  实际 MD5 : $got"
-            echo "  解法     : 打开网盘里的《GameBox-v8.0-引擎云编译修复包2.zip》，"
+            echo "  解法     : 打开网盘里的《GameBox-v8.0-引擎云编译修复包4.zip》，"
             echo "             用里面的同名文件，在 GitHub 仓库用"
             echo "             Add file → Upload files 拖拽方式覆盖上传到"
             echo "             engine/patches/ 文件夹（不要用 Create new file"
@@ -369,7 +397,7 @@ jobs:
           if (-not (Test-Path 'src\shadps4-sifac4k-main\CMakeLists.txt')) { throw '解压后未找到 src\shadps4-sifac4k-main\CMakeLists.txt（源码包不完整）' }
           Write-Host '[OK] 源码解压完成'
 
-      - name: 应用渲染修复主补丁（v2+v3+v4+v5+v6+v8.1，v2.1 防弹应用 + v8.1 MD5 预检前置）
+      - name: 应用渲染修复主补丁（v2+v3+v4+v5+v6+v8.1 补丁，v2.1 防弹应用 + v8.2 MD5 预检前置）
         shell: bash
         run: |
           set -e
