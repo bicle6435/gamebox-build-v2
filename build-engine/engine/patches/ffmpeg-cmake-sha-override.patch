@@ -1,0 +1,26 @@
+--- a/externals/ffmpeg-core/CMakeLists.txt	2026-10-05 00:25:09.147603433 +0000
++++ b/externals/ffmpeg-core/CMakeLists.txt	2026-10-05 00:25:09.147603433 +0000
+@@ -32,12 +32,17 @@
+ 	message(FATAL_ERROR "Unsupported architecture.")
+ endif()
+ 
+-# Compute current short git commit SHA
+-execute_process(
+-	COMMAND git rev-parse --short HEAD
+-	WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+-	OUTPUT_VARIABLE FFMPEG_GIT_SHA
+-	OUTPUT_STRIP_TRAILING_WHITESPACE)
++# Compute current short git commit SHA.
++# GameBox patch: allow an explicit FFMPEG_GIT_SHA override for source trees
++# without git history (e.g. exported zip snapshots), so CI builds can pin the
++# prebuilt release explicitly: cmake -DFFMPEG_GIT_SHA=<short-sha>.
++if(NOT DEFINED FFMPEG_GIT_SHA)
++	execute_process(
++		COMMAND git rev-parse --short HEAD
++		WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
++		OUTPUT_VARIABLE FFMPEG_GIT_SHA
++		OUTPUT_STRIP_TRAILING_WHITESPACE)
++endif()
+ 
+ # Download prebuilt ffmpeg
+ set(FFMPEG_ZIP_PATH "${CMAKE_BINARY_DIR}/externals/ffmpeg-${FFMPEG_GIT_SHA}.zip")

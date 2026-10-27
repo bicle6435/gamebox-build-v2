@@ -1,0 +1,11 @@
+--- a/externals/ImGuiFileDialog/ImGuiFileDialog.cpp	2026-10-05 00:25:09.148603439 +0000
++++ b/externals/ImGuiFileDialog/ImGuiFileDialog.cpp	2026-10-05 00:25:09.148603439 +0000
+@@ -4242,7 +4242,7 @@
+ 
+     ImGuiContext &g = *GImGui;
+     g.NextWindowData.HasFlags |= ImGuiNextWindowDataFlags_HasChildFlags;
+-    g.NextWindowData.ChildFlagsSet |= ImGuiChildFlags_NavFlattened;
++    g.NextWindowData.ChildFlags |= ImGuiChildFlags_NavFlattened; // local-validation shim (old imgui snapshot)
+     if (ImGui::BeginTableEx("##FileDialog_fileTable", listViewID, 2, flags, vSize, 0.0f)) //-V112
+     {
+         ImGui::TableSetupScrollFreeze(0, 1);  // Make header always visible

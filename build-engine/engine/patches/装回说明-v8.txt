@@ -1,0 +1,23 @@
+GameBox v8.0 引擎补丁装回说明（完整版形态）
+==============================================
+
+【完整版用户（推荐路径）】
+完整版 zip 里的引擎已经是云编译好的 v8 渲染返工版，
+本说明不需要执行——直接看《先看我-v8完整版三步装回.txt》。
+
+【手动装回（仅当你单独下载了 Artifacts 里的引擎时用）】
+1. 从 Actions 运行页 Artifacts「shadPS4-415907b-patched-v8」下载
+2. 解压得到 shadPS4-415907b-patched.exe
+3. 覆盖到 engine\shadps4\shadPS4-415907b-patched.exe
+   （建议先把旧的改名 .bak 留作回退）
+4. 版本管理器里勾选 shadPS4-415907b-patched.exe（或让体检页
+   「一键整理/装回产物」自动完成）
+5. 验证：设置 → 体检页「补丁引擎版本识别」显示
+   GameBox v8.0 渲染返工版 ✓
+
+【验证标记（日志党用，需 logEnabled=true）】
+启动游戏后 shad_log.txt 应出现：
+  [Render.Vulkan] Host format fallback: ... (首次用到回退时)
+  [Render.Vulkan] Polygon offset in use: ...
+若 shad_log.txt 是 0 字节 → 游戏专属设置里 logEnabled 改 true
+（完整版组装时已把被覆盖的 false 修正回 true，仅手动装回旧配置的用户需自查）

@@ -1,0 +1,611 @@
+diff --git a/src/shader_recompiler/frontend/translate/translate.h b/src/shader_recompiler/frontend/translate/translate.h
+index 1eea047..01f0ee1 100644
+--- a/src/shader_recompiler/frontend/translate/translate.h
++++ b/src/shader_recompiler/frontend/translate/translate.h
+@@ -218,7 +218,12 @@ public:
+     void V_FLOOR_F32(const GcnInst& inst);
+     void V_EXP_F32(const GcnInst& inst);
+     void V_LOG_F32(const GcnInst& inst);
++    void V_LOG_CLAMP_F32(const GcnInst& inst);
+     void V_RCP_F32(const GcnInst& inst);
++    void V_RCP_CLAMP_F32(const GcnInst& inst);
++    void V_RCP_CLAMP_F64(const GcnInst& inst);
++    void V_RSQ_CLAMP_F32(const GcnInst& inst);
++    void V_RSQ_CLAMP_F64(const GcnInst& inst);
+     void V_RCP_LEGACY_F32(const GcnInst& inst);
+     void V_RCP_F64(const GcnInst& inst);
+     void V_RSQ_F32(const GcnInst& inst);
+diff --git a/src/shader_recompiler/frontend/translate/vector_alu.cpp b/src/shader_recompiler/frontend/translate/vector_alu.cpp
+index 5fc7dcf..e742975 100644
+--- a/src/shader_recompiler/frontend/translate/vector_alu.cpp
++++ b/src/shader_recompiler/frontend/translate/vector_alu.cpp
+@@ -167,7 +167,9 @@ void Translator::EmitVectorAlu(const GcnInst& inst) {
+     case Opcode::V_EXP_F32:
+         return V_EXP_F32(inst);
+     case Opcode::V_LOG_CLAMP_F32:
+-        return V_LOG_F32(inst);
++        // GCN clamped variant: dst = log2(clamp(src, 2^-126, 2^127)). The clamp
++        // guards against log(0) = -inf and log(neg) = NaN propagation.
++        return V_LOG_CLAMP_F32(inst);
+     case Opcode::V_LOG_F32:
+         return V_LOG_F32(inst);
+     case Opcode::V_RCP_F32:
+@@ -176,12 +178,22 @@ void Translator::EmitVectorAlu(const GcnInst& inst) {
+         return V_RCP_LEGACY_F32(inst);
+     case Opcode::V_RCP_F64:
+         return V_RCP_F64(inst);
++    // GCN clamped F64 variants were previously missing entirely (LogMissingOpcode
++    // left the destination register stale, corrupting downstream computation).
++    case Opcode::V_RCP_CLAMP_F64:
++        return V_RCP_CLAMP_F64(inst);
++    case Opcode::V_RSQ_CLAMP_F64:
++        return V_RSQ_CLAMP_F64(inst);
+     case Opcode::V_RCP_IFLAG_F32:
+         return V_RCP_F32(inst);
+     case Opcode::V_RCP_CLAMP_F32:
+-        return V_RCP_F32(inst);
++        // GCN clamped variant: dst = clamp(1/x, -FLT_MAX, FLT_MAX). Prevents
++        // inf propagation when x is zero or denormal (HDR tonemap, light decay).
++        return V_RCP_CLAMP_F32(inst);
+     case Opcode::V_RSQ_CLAMP_F32:
+-        return V_RSQ_F32(inst);
++        // GCN clamped variant: dst = clamp(sqrt(1/x), -FLT_MAX, FLT_MAX).
++        // Prevents inf/NaN propagation for out-of-range inputs (normalization).
++        return V_RSQ_CLAMP_F32(inst);
+     case Opcode::V_RSQ_LEGACY_F32:
+         return V_RSQ_F32(inst);
+     case Opcode::V_RSQ_F32:
+@@ -1028,6 +1040,59 @@ void Translator::V_LOG_F32(const GcnInst& inst) {
+     SetDst(inst.dst[0], ir.FPLog2(src0));
+ }
+ 
++void Translator::V_LOG_CLAMP_F32(const GcnInst& inst) {
++    // D = log2(clamp(S0, 2^-126, 2^127))  [GCN ISA: V_LOG_CLAMP_F32]
++    // The hardware clamp keeps the operand inside the positive normal range so
++    // that the result never becomes -inf (S0 == 0), +inf (S0 == +inf) or NaN
++    // (S0 < 0). Emitting a plain log2 instead lets those specials propagate
++    // into HDR tonemaps / exposure chains and shows up as black patches or
++    // blown-out highlights.
++    const IR::F32 src0{GetSrc<IR::F32>(inst.src[0])};
++    const IR::F32 clamped{
++        ir.FPClamp(src0, ir.Imm32(1.17549435e-38f), ir.Imm32(3.40282347e38f))};
++    SetDst(inst.dst[0], ir.FPLog2(clamped));
++}
++
++void Translator::V_RCP_CLAMP_F32(const GcnInst& inst) {
++    // D = clamp(1/S0, -FLT_MAX, FLT_MAX)  [GCN ISA: V_RCP_CLAMP_F32]
++    // Clamps the reciprocal so it saturates instead of overflowing to inf
++    // when S0 is zero or subnormal.
++    const IR::F32 src0{GetSrc<IR::F32>(inst.src[0])};
++    const IR::F32 recip{ir.FPRecip(src0)};
++    SetDst(inst.dst[0], ir.FPClamp(recip, ir.Imm32(-3.40282347e38f), ir.Imm32(3.40282347e38f)));
++}
++
++void Translator::V_RSQ_CLAMP_F32(const GcnInst& inst) {
++    // D = clamp(sqrt(1/S0), -FLT_MAX, FLT_MAX)  [GCN ISA: V_RSQ_CLAMP_F32]
++    // Clamps the reciprocal square root so it saturates instead of producing
++    // inf (S0 == 0) or NaN (S0 < 0) that would poison normalized vectors.
++    const IR::F32 src0{GetSrc<IR::F32>(inst.src[0])};
++    const IR::F32 rsq{ir.FPRecipSqrt(src0)};
++    SetDst(inst.dst[0], ir.FPClamp(rsq, ir.Imm32(-3.40282347e38f), ir.Imm32(3.40282347e38f)));
++}
++
++void Translator::V_RCP_CLAMP_F64(const GcnInst& inst) {
++    // D = clamp(1/S0, -DBL_MAX, DBL_MAX)  [GCN ISA: V_RCP_CLAMP_F64]
++    // Previously unhandled: the opcode fell through to LogMissingOpcode, which
++    // skips codegen and leaves the destination operand holding stale register
++    // data, silently corrupting any dependent double-precision math.
++    const IR::F64 src0{GetSrc64<IR::F64>(inst.src[0])};
++    const IR::F64 recip{ir.FPRecip(src0)};
++    SetDst64(inst.dst[0],
++             ir.FPClamp(recip, ir.Imm64(f64{-1.7976931348623157e308}),
++                        ir.Imm64(f64{1.7976931348623157e308})));
++}
++
++void Translator::V_RSQ_CLAMP_F64(const GcnInst& inst) {
++    // D = clamp(sqrt(1/S0), -DBL_MAX, DBL_MAX)  [GCN ISA: V_RSQ_CLAMP_F64]
++    // Previously unhandled, see V_RCP_CLAMP_F64 above.
++    const IR::F64 src0{GetSrc64<IR::F64>(inst.src[0])};
++    const IR::F64 rsq{ir.FPRecipSqrt(src0)};
++    SetDst64(inst.dst[0],
++             ir.FPClamp(rsq, ir.Imm64(f64{-1.7976931348623157e308}),
++                        ir.Imm64(f64{1.7976931348623157e308})));
++}
++
+ void Translator::V_RCP_F32(const GcnInst& inst) {
+     const IR::F32 src0{GetSrc<IR::F32>(inst.src[0])};
+     SetDst(inst.dst[0], ir.FPRecip(src0));
+diff --git a/src/video_core/amdgpu/liverpool.cpp b/src/video_core/amdgpu/liverpool.cpp
+index 621d479..92de56b 100644
+--- a/src/video_core/amdgpu/liverpool.cpp
++++ b/src/video_core/amdgpu/liverpool.cpp
+@@ -413,7 +413,20 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+                 break;
+             }
+             case PM4ItOpcode::SetPredication: {
+-                LOG_WARNING(Render, "Unimplemented IT_SET_PREDICATION");
++                const auto* predication_cmd =
++                    reinterpret_cast<const PM4CmdSetPredication*>(header);
++                const auto address = predication_cmd->Address();
++                if (address == 0) {
++                    // A null predicate address disables predication.
++                    predication.enabled = false;
++                } else {
++                    predication.enabled = true;
++                    predication.address = address;
++                    predication.inverted = predication_cmd->op.Value() != 0;
++                    predication.bool64 = predication_cmd->bool64.Value() != 0;
++                }
++                LOG_TRACE(Render, "IT_SET_PREDICATION {} address {:#x}",
++                           predication.enabled ? "enabled" : "disabled", address);
+                 break;
+             }
+             case PM4ItOpcode::IndexType: {
+@@ -428,6 +441,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+                 regs.index_base_address.base_addr_hi = draw_index->index_base_hi;
+                 regs.num_indices = draw_index->index_count;
+                 regs.draw_initiator = draw_index->draw_initiator;
++                last_draw_num_vertices = draw_index->index_count;
+                 if (DebugState.DumpingCurrentReg()) {
+                     DebugState.PushRegsDump(base_addr, reinterpret_cast<uintptr_t>(header), regs);
+                 }
+@@ -449,6 +463,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+                 regs.max_index_size = draw_index_off->max_size;
+                 regs.num_indices = draw_index_off->index_count;
+                 regs.draw_initiator = draw_index_off->draw_initiator;
++                last_draw_num_vertices = draw_index_off->index_count;
+                 if (DebugState.DumpingCurrentReg()) {
+                     DebugState.PushRegsDump(base_addr, reinterpret_cast<uintptr_t>(header), regs);
+                 }
+@@ -469,6 +484,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+                 const auto* draw_index = reinterpret_cast<const PM4CmdDrawIndexAuto*>(header);
+                 regs.num_indices = draw_index->index_count;
+                 regs.draw_initiator = draw_index->draw_initiator;
++                last_draw_num_vertices = draw_index->index_count;
+                 if (DebugState.DumpingCurrentReg()) {
+                     DebugState.PushRegsDump(base_addr, reinterpret_cast<uintptr_t>(header), regs);
+                 }
+@@ -861,12 +877,40 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
+             }
+             case PM4ItOpcode::StrmoutBufferUpdate: {
+                 const auto* strmout = reinterpret_cast<const PM4CmdStrmoutBufferUpdate*>(header);
+-                LOG_WARNING(Render_Vulkan,
+-                            "Unimplemented IT_STRMOUT_BUFFER_UPDATE, update_memory = {}, "
+-                            "source_select = {}, buffer_select = {}",
+-                            strmout->update_memory.Value(),
+-                            magic_enum::enum_name(strmout->source_select.Value()),
+-                            strmout->buffer_select.Value());
++                if (strmout->update_memory.Value() == 0) {
++                    // Only updates internal VGT state; nothing to emulate.
++                    break;
++                }
++                if (!rasterizer) {
++                    break;
++                }
++                const auto dst_addr = strmout->DstAddress<VAddr>();
++                switch (strmout->source_select.Value()) {
++                case SourceSelect::BufferOffset:
++                    // Exact semantics: write the immediate offset word to memory.
++                    rasterizer->FillBuffer(dst_addr, sizeof(u32), strmout->buffer_offset, false);
++                    break;
++                case SourceSelect::SrcAddress:
++                    // Exact semantics: copy the source word to the destination.
++                    rasterizer->CopyBuffer(dst_addr, strmout->SrcAddress<VAddr>(),
++                                           sizeof(u32), false, false);
++                    break;
++                case SourceSelect::VgtStrmoutBufferFilledSize: {
++                    // Transform feedback is not implemented on the host. Report the
++                    // vertex count of the most recent draw as a plausible filled
++                    // size so CPU-side visibility readback sees geometry as
++                    // written instead of a permanently-zero counter.
++                    const u32 filled_estimate = last_draw_num_vertices;
++                    rasterizer->FillBuffer(dst_addr, sizeof(u32), filled_estimate, false);
++                    LOG_TRACE(Render_Vulkan,
++                              "IT_STRMOUT_BUFFER_UPDATE filled-size estimate {} "
++                              "for buffer {} written to {:#x}",
++                              filled_estimate, strmout->buffer_select.Value(), dst_addr);
++                    break;
++                }
++                default:
++                    break;
++                }
+                 break;
+             }
+             case PM4ItOpcode::GetLodStats: {
+diff --git a/src/video_core/amdgpu/liverpool.h b/src/video_core/amdgpu/liverpool.h
+index 249ea2b..cd4d44b 100644
+--- a/src/video_core/amdgpu/liverpool.h
++++ b/src/video_core/amdgpu/liverpool.h
+@@ -63,6 +63,27 @@ struct Liverpool {
+     std::array<CbDbExtent, NUM_COLOR_BUFFERS> last_cb_extent{};
+     CbDbExtent last_db_extent{};
+ 
++    /**
++     * @brief CP predication state, set by IT_SET_PREDICATION.
++     *
++     * When enabled, subsequent rendering commands are discarded by the host
++     * via VK_EXT_conditional_rendering unless the predicate value at
++     * `address` satisfies `inverted` (see PM4CmdSetPredication).
++     */
++    struct PredicationState {
++        bool enabled{};
++        bool inverted{}; ///< true: draw when value == 0
++        bool bool64{};   ///< true: 64-bit predicate
++        VAddr address{};
++    } predication{};
++
++    /**
++     * @brief Vertex count of the most recent graphics draw, captured so that
++     *        IT_STRMOUT_BUFFER_UPDATE can report a plausible filled size for
++     *        games that perform CPU-side visibility readback.
++     */
++    u32 last_draw_num_vertices{};
++
+ public:
+     explicit Liverpool();
+     ~Liverpool();
+diff --git a/src/video_core/amdgpu/pm4_cmds.h b/src/video_core/amdgpu/pm4_cmds.h
+index abf58ad..c714d69 100644
+--- a/src/video_core/amdgpu/pm4_cmds.h
++++ b/src/video_core/amdgpu/pm4_cmds.h
+@@ -286,6 +286,34 @@ struct PM4CmdStrmoutBufferUpdate {
+     }
+ };
+ 
++/**
++ * @brief IT_SET_PREDICATION (PM4 type-3 opcode 0x20)
++ *
++ * Sets the predication address used by the CP to conditionally discard
++ * subsequent rendering commands. The 32-bit (or 64-bit when bool64 is set)
++ * value at the given GPU address acts as the predicate: drawing continues
++ * while the predicate satisfies `op`.
++ *   - op = 0 : draw when value != 0 (occlusion query visible)
++ *   - op = 1 : draw when value == 0 (inverted condition)
++ * An address of 0 disables predication.
++ */
++struct PM4CmdSetPredication {
++    PM4Type3Header header;
++    union {
++        BitField<0, 1, u32> op;     ///< 0: pass when value != 0; 1: pass when value == 0
++        BitField<1, 1, u32> bool64; ///< 1: compare 64-bit value, 0: compare 32-bit
++        u32 control;
++    };
++    u32 address_lo;
++    u32 address_hi;
++
++    template <typename T = u64>
++    T Address() const {
++        return reinterpret_cast<T>(address_lo | u64(address_hi & 0xFFFF) << 32);
++    }
++};
++static_assert(sizeof(PM4CmdSetPredication) == 16); // header(4) + control + addr_lo + addr_hi
++
+ struct PM4CmdDrawIndexOffset2 {
+     PM4Type3Header header;
+     u32 max_size;       ///< Maximum number of indices
+diff --git a/src/video_core/renderer_vulkan/liverpool_to_vk.cpp b/src/video_core/renderer_vulkan/liverpool_to_vk.cpp
+index 61c858f..8d85beb 100644
+--- a/src/video_core/renderer_vulkan/liverpool_to_vk.cpp
++++ b/src/video_core/renderer_vulkan/liverpool_to_vk.cpp
+@@ -7,6 +7,7 @@
+ #include "video_core/renderer_vulkan/liverpool_to_vk.h"
+ 
+ #include <magic_enum/magic_enum.hpp>
++#include <array>
+ 
+ #define INVALID_NUMBER_FORMAT_COMBO                                                                \
+     LOG_ERROR(Render_Vulkan, "Unsupported number type {} for format {}", number_type, format);
+@@ -301,6 +302,13 @@ vk::LogicOp LogicOp(AmdGpu::ColorControl::LogicOp logic_op) {
+ 
+ // https://github.com/chaotic-cx/mesa-mirror/blob/0954afff5/src/amd/vulkan/radv_sampler.c#L21
+ vk::SamplerAddressMode ClampMode(AmdGpu::ClampMode mode) {
++    // Mirror-once variants with a border component have no Vulkan equivalent
++    // (there is no VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_BORDER).
++    // eMirrorClampToEdge is the closest approximation and is what every major
++    // emulator uses; the residual difference only shows when the border color
++    // deliberately differs from the texture edge. Log each distinct mode once
++    // to keep the log usable instead of spamming on every sampler creation.
++    static std::array<bool, 8> s_clamp_approx_logged{};
+     switch (mode) {
+     case AmdGpu::ClampMode::Wrap:
+         return vk::SamplerAddressMode::eRepeat;
+@@ -310,14 +318,22 @@ vk::SamplerAddressMode ClampMode(AmdGpu::ClampMode mode) {
+         return vk::SamplerAddressMode::eClampToEdge;
+     case AmdGpu::ClampMode::MirrorOnceHalfBorder:
+     case AmdGpu::ClampMode::MirrorOnceBorder:
+-        LOG_WARNING(Render_Vulkan, "Unimplemented clamp mode {}, using closest equivalent.",
+-                    static_cast<u32>(mode));
++        if (!s_clamp_approx_logged[static_cast<size_t>(mode)]) {
++            s_clamp_approx_logged[static_cast<size_t>(mode)] = true;
++            LOG_WARNING(Render_Vulkan,
++                        "Clamp mode {} has no Vulkan mirror-clamp-to-border equivalent, "
++                        "approximating with mirror-clamp-to-edge (border color ignored)",
++                        static_cast<u32>(mode));
++        }
+         [[fallthrough]];
+     case AmdGpu::ClampMode::MirrorOnceLastTexel:
+         return vk::SamplerAddressMode::eMirrorClampToEdge;
+     case AmdGpu::ClampMode::ClampHalfBorder:
+-        LOG_WARNING(Render_Vulkan, "Unimplemented clamp mode {}, using closest equivalent.",
+-                    static_cast<u32>(mode));
++        if (!s_clamp_approx_logged[static_cast<size_t>(mode)]) {
++            s_clamp_approx_logged[static_cast<size_t>(mode)] = true;
++            LOG_WARNING(Render_Vulkan,
++                        "Clamp mode {} approximated with clamp-to-border", static_cast<u32>(mode));
++        }
+         [[fallthrough]];
+     case AmdGpu::ClampMode::ClampBorder:
+         return vk::SamplerAddressMode::eClampToBorder;
+diff --git a/src/video_core/renderer_vulkan/vk_instance.cpp b/src/video_core/renderer_vulkan/vk_instance.cpp
+index 0af5dbe..19aa0b3 100644
+--- a/src/video_core/renderer_vulkan/vk_instance.cpp
++++ b/src/video_core/renderer_vulkan/vk_instance.cpp
+@@ -203,7 +203,8 @@ bool Instance::CreateDevice() {
+                           vk::PhysicalDevicePrimitiveTopologyListRestartFeaturesEXT,
+                           vk::PhysicalDeviceShaderAtomicFloat2FeaturesEXT,
+                           vk::PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR,
+-                          vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT>();
++                          vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT,
++                          vk::PhysicalDeviceConditionalRenderingFeaturesEXT>();
+     features = feature_chain.get().features;
+ 
+     const vk::StructureChain properties_chain = physical_device.getProperties2<
+@@ -276,6 +277,20 @@ bool Instance::CreateDevice() {
+                  dynamic_state_3_features.extendedDynamicState3ColorWriteMask);
+     }
+     custom_border_color = add_extension(VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
++    conditional_rendering = add_extension(VK_EXT_CONDITIONAL_RENDERING_EXTENSION_NAME);
++    if (conditional_rendering) {
++        const auto conditional_rendering_features =
++            feature_chain.get<vk::PhysicalDeviceConditionalRenderingFeaturesEXT>();
++        if (!conditional_rendering_features.conditionalRendering) {
++            // Extension is advertised but the feature bit is off; drop the extension
++            // so the device feature chain stays valid.
++            conditional_rendering = false;
++            enabled_extensions.pop_back();
++            LOG_WARNING(Render_Vulkan,
++                        "VK_EXT_conditional_rendering advertised without the "
++                        "conditionalRendering feature; predication will be ignored.");
++        }
++    }
+     depth_clip_control = add_extension(VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME);
+     depth_clip_enable = add_extension(VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME);
+     vertex_input_dynamic_state = add_extension(VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
+@@ -434,6 +449,9 @@ bool Instance::CreateDevice() {
+             .maintenance4 = vk13_features.maintenance4,
+         },
+         // Extensions
++        vk::PhysicalDeviceConditionalRenderingFeaturesEXT{
++            .conditionalRendering = conditional_rendering,
++        },
+         vk::PhysicalDeviceCustomBorderColorFeaturesEXT{
+             .customBorderColors = true,
+             .customBorderColorWithoutFormat = true,
+@@ -775,7 +793,16 @@ vk::Format Instance::GetSupportedFormat(const vk::Format format,
+                                         const vk::FormatFeatureFlags2 flags) const {
+     if (!IsFormatSupported(format, flags)) [[unlikely]] {
+         switch (format) {
+-        case vk::Format::eD16UnormS8Uint:
++        case vk::Format::eD16UnormS8Uint: {
++            // Common on NVIDIA (no D16S8 support at all) and old Intel. The
++            // rasterizer depth-bias compensation relies on this fallback path.
++            static bool s_d16s8_fallback_logged = false;
++            if (!s_d16s8_fallback_logged) {
++                s_d16s8_fallback_logged = true;
++                LOG_INFO(Render_Vulkan,
++                         "Format D16UnormS8Uint unsupported with required features: falling "
++                         "back to a host-supported depth-stencil format");
++            }
+             if (IsFormatSupported(vk::Format::eD24UnormS8Uint, flags)) {
+                 return vk::Format::eD24UnormS8Uint;
+             }
+@@ -783,6 +810,7 @@ vk::Format Instance::GetSupportedFormat(const vk::Format format,
+                 return vk::Format::eD32SfloatS8Uint;
+             }
+             break;
++        }
+         case vk::Format::eR8Srgb:
+             if (IsFormatSupported(vk::Format::eR8Unorm, flags)) {
+                 return vk::Format::eR8Unorm;
+diff --git a/src/video_core/renderer_vulkan/vk_instance.h b/src/video_core/renderer_vulkan/vk_instance.h
+index 21f2cbd..a094970 100644
+--- a/src/video_core/renderer_vulkan/vk_instance.h
++++ b/src/video_core/renderer_vulkan/vk_instance.h
+@@ -124,6 +124,11 @@ public:
+         return attachment_feedback_loop;
+     }
+ 
++    /// Returns true when VK_EXT_conditional_rendering is supported and enabled
++    bool IsConditionalRenderingSupported() const {
++        return conditional_rendering;
++    }
++
+     /// Returns true when VK_EXT_custom_border_color is supported
+     bool IsCustomBorderColorSupported() const {
+         return custom_border_color;
+@@ -492,6 +497,7 @@ private:
+     TracyVkCtx profiler_context{};
+     u32 queue_family_index{0};
+     bool custom_border_color{};
++    bool conditional_rendering{};
+     bool fragment_shader_barycentric{};
+     bool amd_shader_explicit_vertex_parameter{};
+     bool depth_clip_control{};
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index 6fc0aff..4ea438b 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -142,8 +142,13 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
+         image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
+         auto& image = texture_cache.GetImage(image_id);
+         image.binding.is_target = 1u;
++        // Remember the format of the backing image actually allocated. It can
++        // differ from the guest-requested one after host fallback resolution
++        // (e.g. Z16+Stencil8 -> D24UnormS8Uint on NVIDIA GPUs).
++        db_format_actual = image.backing->image.image_ci.format;
+     } else {
+         db_desc.first = {};
++        db_format_actual = vk::Format::eUndefined;
+     }
+ }
+ 
+@@ -214,13 +219,36 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
+ 
+     pipeline->BindResources(set_writes, buffer_barriers, push_data);
+     UpdateDynamicState(pipeline, is_indexed);
++
++    // Emulated CP predication (IT_SET_PREDICATION) via conditional rendering.
++    // Conditional rendering blocks must wrap the render pass instance, so any
++    // previously open pass is closed first and the pass opened below is closed
++    // again before the block ends.
++    const auto& predication = liverpool->predication;
++    const bool use_conditional_rendering =
++        predication.enabled && instance.IsConditionalRenderingSupported();
++
++    const auto cmdbuf = scheduler.CommandBuffer();
++    vk::ConditionalRenderingBeginInfoEXT conditional_rendering_info{};
++    if (use_conditional_rendering) {
++        scheduler.EndRendering();
++        auto [predicate_buffer, predicate_offset] =
++            buffer_cache.ObtainBuffer(predication.address,
++                                      predication.bool64 ? sizeof(u64) : sizeof(u32), false);
++        conditional_rendering_info.buffer = predicate_buffer->Handle();
++        conditional_rendering_info.offset = predicate_offset;
++        if (predication.inverted) {
++            conditional_rendering_info.flags = vk::ConditionalRenderingFlagBitsEXT::eInverted;
++        }
++        cmdbuf.beginConditionalRenderingEXT(conditional_rendering_info);
++    }
++
+     scheduler.BeginRendering(state);
+ 
+     const auto& vs_info = pipeline->GetStage(Shader::LogicalStage::Vertex);
+     const auto& fetch_shader = pipeline->GetFetchShader();
+     const auto [vertex_offset, instance_offset] = GetDrawOffsets(regs, vs_info, fetch_shader);
+ 
+-    const auto cmdbuf = scheduler.CommandBuffer();
+     cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
+ 
+     if (is_indexed) {
+@@ -230,6 +258,12 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
+         cmdbuf.draw(regs.num_indices, regs.num_instances.NumInstances(), vertex_offset,
+                     instance_offset);
+     }
++
++    if (use_conditional_rendering) {
++        scheduler.EndRendering();
++        cmdbuf.endConditionalRenderingEXT();
++    }
++
+     DebugState.IncDrawCall();
+ 
+     ResetBindings();
+@@ -283,12 +317,33 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
+ 
+     pipeline->BindResources(set_writes, buffer_barriers, push_data);
+     UpdateDynamicState(pipeline, is_indexed);
++
++    // Emulated CP predication (IT_SET_PREDICATION) via conditional rendering,
++    // identical to the direct draw path. The block wraps the render pass.
++    const auto& predication = liverpool->predication;
++    const bool use_conditional_rendering =
++        predication.enabled && instance.IsConditionalRenderingSupported();
++
++    const auto cmdbuf = scheduler.CommandBuffer();
++    vk::ConditionalRenderingBeginInfoEXT conditional_rendering_info{};
++    if (use_conditional_rendering) {
++        scheduler.EndRendering();
++        auto [predicate_buffer, predicate_offset] =
++            buffer_cache.ObtainBuffer(predication.address,
++                                      predication.bool64 ? sizeof(u64) : sizeof(u32), false);
++        conditional_rendering_info.buffer = predicate_buffer->Handle();
++        conditional_rendering_info.offset = predicate_offset;
++        if (predication.inverted) {
++            conditional_rendering_info.flags = vk::ConditionalRenderingFlagBitsEXT::eInverted;
++        }
++        cmdbuf.beginConditionalRenderingEXT(conditional_rendering_info);
++    }
++
+     scheduler.BeginRendering(state);
+ 
+     // We can safely ignore both SGPR UD indices and results of fetch shader parsing, as vertex and
+     // instance offsets will be automatically applied by Vulkan from indirect args buffer.
+ 
+-    const auto cmdbuf = scheduler.CommandBuffer();
+     cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
+ 
+     if (is_indexed) {
+@@ -313,6 +368,11 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
+         DebugState.IncDrawCall();
+     }
+ 
++    if (use_conditional_rendering) {
++        scheduler.EndRendering();
++        cmdbuf.endConditionalRenderingEXT();
++    }
++
+     ResetBindings();
+ }
+ 
+@@ -1304,9 +1364,41 @@ void Rasterizer::UpdateDepthStencilState() const {
+     dynamic_state.SetDepthBiasEnabled(depth_bias_enabled);
+     if (depth_bias_enabled) {
+         const bool front = regs.polygon_control.enable_polygon_offset_front;
++        float depth_bias_offset =
++            front ? regs.poly_offset.front_offset : regs.poly_offset.back_offset;
++        // Depth-bias units in Vulkan are multiples of the bound depth format's
++        // minimum representable value. Games tune the offset for the format
++        // they programmed (Z16 -> 1/65535 per unit). When the host silently
++        // falls back to a deeper format (D16S8 is unsupported on NVIDIA and
++        // becomes D24S8, i.e. 1/16777215 per unit), the same offset shifts the
++        // geometry by only 1/256 of the intended depth, causing z-fighting,
++        // shadow acne and decals flickering. Rescale by the ratio of minimum
++        // representable values to keep the effective depth displacement.
++        // Note: GCN has no Z24 mode, so a D24UnormS8Uint backing can only
++        // originate from the Z16 fallback path, never from a guest request.
++        static bool s_d16s8_fallback_logged = false;
++        const bool guest_requested_d16 =
++            regs.depth_buffer.z_info.format == AmdGpu::DepthBuffer::ZFormat::Z16;
++        if (guest_requested_d16 && db_format_actual == vk::Format::eD24UnormS8Uint) {
++            depth_bias_offset *= 256.0f; // 2^24 / 2^16
++            if (!s_d16s8_fallback_logged) {
++                s_d16s8_fallback_logged = true;
++                LOG_INFO(Render_Vulkan,
++                         "D16S8 depth format fallback (D24S8) detected: depth-bias units "
++                         "rescaled by 256x to preserve polygon offset geometry");
++            }
++        } else if (guest_requested_d16 &&
++                   db_format_actual == vk::Format::eD32SfloatS8Uint) {
++            if (!s_d16s8_fallback_logged) {
++                s_d16s8_fallback_logged = true;
++                LOG_INFO(Render_Vulkan,
++                         "D16S8 depth format fallback (D32SfloatS8) detected: depth-bias unit "
++                         "mapping is implementation-defined for float formats, offset kept "
++                         "unscaled");
++            }
++        }
+         dynamic_state.SetDepthBias(
+-            front ? regs.poly_offset.front_offset : regs.poly_offset.back_offset,
+-            regs.poly_offset.depth_bias,
++            depth_bias_offset, regs.poly_offset.depth_bias,
+             (front ? regs.poly_offset.front_scale : regs.poly_offset.back_scale) / 16.f);
+     }
+ 
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.h b/src/video_core/renderer_vulkan/vk_rasterizer.h
+index 4165883..e2334cf 100644
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.h
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.h
+@@ -132,6 +132,13 @@ private:
+     using RenderTargetInfo = std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc>;
+     std::array<RenderTargetInfo, AmdGpu::NUM_COLOR_BUFFERS> cb_descs;
+     std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc> db_desc;
++    // Vulkan format actually used for the bound depth-stencil backing image.
++    // It may differ from the guest-requested format when the host GPU lacks
++    // support (e.g. D16UnormS8Uint is universally unsupported on NVIDIA, the
++    // engine silently falls back to D24UnormS8Uint). UpdateDepthStencilState
++    // reads this to rescale depth-bias units, which per the Vulkan spec are
++    // multiples of the format's minimum representable depth value.
++    vk::Format db_format_actual{vk::Format::eUndefined};
+     boost::container::static_vector<vk::DescriptorImageInfo, Shader::NUM_IMAGES> image_infos;
+     boost::container::static_vector<vk::DescriptorBufferInfo, Shader::NUM_BUFFERS> buffer_infos;
+     boost::container::static_vector<VideoCore::ImageId, Shader::NUM_IMAGES> bound_images;
