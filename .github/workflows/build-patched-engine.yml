@@ -3,7 +3,35 @@
 # ─────────────────────────────────────────────────────────────────────
 # v7.0 新增（2026-10-07）：三项渲染问题引擎侧根治（误报根治在前端完整包）
 #
-# 新增 shadps4-gamebox-v7-render-srgb-depth.patch（6 文件 344 行）：
+# ============================================================
+# v8.0（2026-10-26）：渲染亮度返工版 —— 撤 sRGB 直通，保留格式阶梯
+# 新增 shadps4-gamebox-v8-render-brightness.patch（6 文件 344 行）：
+#   1. 保留 v7 全部有效修复：
+#      - vk_instance.cpp/.h 全格式回退阶梯（960M 实测：D16S8 条目为 NULL，
+#        D24S8/D32/D32S8 完整支持，阶梯第二级即命中）
+#      - vk_graphics_pipeline.cpp 管线深度/颜色格式用规范特性集解析
+#      - vk_rasterizer.cpp 多边形偏移一次性诊断日志
+#   2. 撤销 v7 的 sRGB 帧格式强制直通（实测为亮度负优化：gamma 双重
+#      校正导致发白发灰、越修越亮——用户 960M 实拍截图已归档确认）
+#   3. 新增 GAMEBOX_OUTPUT_SRGB 环境变量：默认关闭（= 原版亮度），
+#      设为 1 时恢复 v7 的 sRGB 输出链供 A/B 对比，一个引擎两种模式
+#   4. GetFrameAttachmentFormat 函数定义移入 vk_instance.h 类内
+#      （彻底规避 v7.0/v7.1 两代的声明顺序编译失败问题）
+#
+#   与 v7 的关系：本 patch 与 v7 patch 互斥，workflow 已把
+#   v7-render-srgb-depth.patch 的 apply 行替换为 v8（引擎源码不能
+#   同时叠加两个版本——v8 的上下文基于上游原文）。仓库里的旧 v7
+#   patch 文件保留不动（不再被引用，符合"标记只增不减"制度）。
+#
+#   上传步骤（全部用网页 Add file → Create new file）：
+#   1. engine/patches/shadps4-gamebox-v8-render-brightness.patch
+#   2. engine/patches/修复补丁说明-v8.md
+#   3. engine/patches/装回说明-v8.txt
+#   4. .github/workflows/build-patched-engine.yml（整文件覆盖）
+#   5. Actions 页面 → build-patched-engine → Run workflow
+#   6. 约 1~1.5 小时后在 Artifacts 下载 shadPS4-415907b-patched-v8
+# ============================================================
+# 新增 shadps4-gamebox-v8-render-brightness.patch（6 文件 344 行）：
 #   ① 宿主格式回退阶梯补全（vk_instance.cpp GetSupportedFormat）：
 #      旧代码只处理 D16S8/R8Srgb 两种回退，其余格式（D16 无模板、sRGB
 #      视图家族、A2B10G10R10 家族）缺支持时【静默返回不支持格式】→
@@ -28,7 +56,7 @@
 # 用法（三步不变）：
 #   1. 把 .github / engine / build-engine 三个文件夹原样拖进 GitHub 仓库
 #   2. Actions 页面 → build-patched-engine → Run workflow（手动触发）
-#   3. 约 1~1.5 小时后在运行页 Artifacts 下载 shadPS4-415907b-patched-v7
+#   3. 约 1~1.5 小时后在运行页 Artifacts 下载 shadPS4-415907b-patched-v8
 #
 # ─────────────────────────────────────────────────────────────────────
 #（以下为 v6.0 及更早的历史注释，保留备查）
@@ -332,7 +360,7 @@ jobs:
           echo "[OK] v6 管线缓存防崩补丁应用成功（0x80000003 根治：缓存重复条目优雅跳过）"
 
           # ---- v7.0：三项渲染问题根治（格式回退阶梯 / 管线一致性 / sRGB 输出链）----
-          apply_patch "$GITHUB_WORKSPACE/engine/patches/shadps4-gamebox-v7-render-srgb-depth.patch"
+          apply_patch "$GITHUB_WORKSPACE/engine/patches/shadps4-gamebox-v8-render-brightness.patch"
           grep -q 'Host format fallback' src/video_core/renderer_vulkan/vk_instance.cpp || { echo '[失败] 标记缺失: v7 格式回退阶梯'; exit 1; }
           grep -q 'kDepthImageFeatures' src/video_core/renderer_vulkan/vk_instance.h || { echo '[失败] 标记缺失: v7 特性集常量'; exit 1; }
           grep -q 'kColorImageFeatures' src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp || { echo '[失败] 标记缺失: v7 管线格式一致性'; exit 1; }
@@ -541,8 +569,8 @@ jobs:
           if (-not $exe) { throw '未找到编译产物 shadps4.exe' }
           # v3: 产物名对齐 GameBox 前端体检页检测逻辑（无 -v2 后缀）
           Copy-Item $exe.FullName 'artifact\shadPS4-415907b-patched.exe'
-          Copy-Item 'engine\patches\修复补丁说明-v7.md' 'artifact\' -ErrorAction SilentlyContinue
-          Copy-Item 'engine\patches\装回说明-v7.txt' 'artifact\' -ErrorAction SilentlyContinue
+          Copy-Item 'engine\patches\修复补丁说明-v8.md' 'artifact\' -ErrorAction SilentlyContinue
+          Copy-Item 'engine\patches\装回说明-v8.txt' 'artifact\' -ErrorAction SilentlyContinue
           Copy-Item 'engine\patches\修复补丁说明-v5.md' 'artifact\' -ErrorAction SilentlyContinue
           Copy-Item 'engine\patches\装回说明-v5.txt' 'artifact\' -ErrorAction SilentlyContinue
           Write-Host ("[OK] 产物：{0}（{1:N1} MB）" -f $exe.FullName, ($exe.Length/1MB))
@@ -553,6 +581,6 @@ jobs:
         # v5.0.0 仍是 node20，升级时请直接跳到 v6）
         uses: actions/upload-artifact@v6.0.0
         with:
-          name: shadPS4-415907b-patched-v7
+          name: shadPS4-415907b-patched-v8
           path: artifact/
           retention-days: 90
