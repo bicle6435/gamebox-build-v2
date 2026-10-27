@@ -1,6 +1,39 @@
+diff --git a/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp b/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
+index b0c45df..6c628ea 100644
+--- a/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
++++ b/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
+@@ -244,15 +244,21 @@ GraphicsPipeline::GraphicsPipeline(
+         });
+     }
+ 
+-    const auto depth_format =
+-        instance.GetSupportedFormat(LiverpoolToVK::DepthFormat(key.z_format, key.stencil_format),
+-                                    vk::FormatFeatureFlagBits2::eDepthStencilAttachment);
++    // GameBox v7: resolve with the texture cache's canonical depth feature set
++    // (attachment + sampled + transfer) so the pipeline's declared depth format
++    // always matches the format the depth image was actually created with. The
++    // old attachment-only query could disagree with the image-side fallback on
++    // drivers with partial D16S8 support, silently corrupting depth testing
++    // (see-through map geometry, decal/light bleed-through).
++    const auto depth_format = instance.GetSupportedFormat(
++        LiverpoolToVK::DepthFormat(key.z_format, key.stencil_format),
++        Vulkan::Instance::kDepthImageFeatures);
+     std::array<vk::Format, Shader::IR::NumRenderTargets> color_formats;
+     for (s32 i = 0; i < key.num_color_attachments; ++i) {
+         const auto& col_buf = key.color_buffers[i];
+         const auto format = LiverpoolToVK::SurfaceFormat(col_buf.data_format, col_buf.num_format);
+-        const auto color_format =
+-            instance.GetSupportedFormat(format, vk::FormatFeatureFlagBits2::eColorAttachment);
++        const auto color_format = instance.GetSupportedFormat(format,
++                                                              Instance::kColorImageFeatures);
+         if (!instance.IsFormatSupported(color_format,
+                                         vk::FormatFeatureFlagBits2::eColorAttachment)) {
+             LOG_WARNING(Render_Vulkan,
+diff --git a/src/video_core/renderer_vulkan/vk_instance.cpp b/src/video_core/renderer_vulkan/vk_instance.cpp
+index 2a3f69d..cc8ca1e 100644
 --- a/src/video_core/renderer_vulkan/vk_instance.cpp
 +++ b/src/video_core/renderer_vulkan/vk_instance.cpp
-@@ -831,34 +831,109 @@
+@@ -831,35 +831,110 @@ bool Instance::IsFormatSupported(const vk::Format format,
  
  vk::Format Instance::GetSupportedFormat(const vk::Format format,
                                          const vk::FormatFeatureFlags2 flags) const {
@@ -61,6 +94,7 @@
 +            fallback = vk::Format::eD32SfloatS8Uint;
              break;
          }
+-    }
 +        if (IsFormatSupported(vk::Format::eD32Sfloat, flags)) {
 +            fallback = vk::Format::eD32Sfloat;
 +        }
@@ -126,16 +160,27 @@
 +                 "using {} instead",
 +                 vk::to_string(format), vk::to_string(fallback));
 +        return fallback;
-     }
++    }
 +    LOG_WARNING(Render_Vulkan,
 +                "Format {} is not supported with the requested features on this device and "
 +                "has no safe substitute; keeping the format as-is",
 +                vk::to_string(format));
      return format;
  }
+ 
+diff --git a/src/video_core/renderer_vulkan/vk_instance.h b/src/video_core/renderer_vulkan/vk_instance.h
+index a094970..563d47a 100644
 --- a/src/video_core/renderer_vulkan/vk_instance.h
 +++ b/src/video_core/renderer_vulkan/vk_instance.h
-@@ -29,7 +29,54 @@
+@@ -3,6 +3,7 @@
+ 
+ #pragma once
+ 
++#include <cstdlib>
+ #include <span>
+ #include <unordered_map>
+ 
+@@ -29,6 +30,54 @@ public:
      /// Returns a formatted string for the driver version
      std::string GetDriverVersionName();
  
@@ -186,56 +231,15 @@
 +        }
 +        return swapchain_format;
 +    }
- 
++
      /// Gets a compatibility format if the format is not supported.
      [[nodiscard]] vk::Format GetSupportedFormat(vk::Format format,
                                                  vk::FormatFeatureFlags2 flags) const;
---- a/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
-+++ b/src/video_core/renderer_vulkan/vk_graphics_pipeline.cpp
-@@ -244,15 +244,21 @@
-         });
-     }
- 
--    const auto depth_format =
--        instance.GetSupportedFormat(LiverpoolToVK::DepthFormat(key.z_format, key.stencil_format),
--                                    vk::FormatFeatureFlagBits2::eDepthStencilAttachment);
-+    // GameBox v7: resolve with the texture cache's canonical depth feature set
-+    // (attachment + sampled + transfer) so the pipeline's declared depth format
-+    // always matches the format the depth image was actually created with. The
-+    // old attachment-only query could disagree with the image-side fallback on
-+    // drivers with partial D16S8 support, silently corrupting depth testing
-+    // (see-through map geometry, decal/light bleed-through).
-+    const auto depth_format = instance.GetSupportedFormat(
-+        LiverpoolToVK::DepthFormat(key.z_format, key.stencil_format),
-+        Vulkan::Instance::kDepthImageFeatures);
-     std::array<vk::Format, Shader::IR::NumRenderTargets> color_formats;
-     for (s32 i = 0; i < key.num_color_attachments; ++i) {
-         const auto& col_buf = key.color_buffers[i];
-         const auto format = LiverpoolToVK::SurfaceFormat(col_buf.data_format, col_buf.num_format);
--        const auto color_format =
--            instance.GetSupportedFormat(format, vk::FormatFeatureFlagBits2::eColorAttachment);
-+        const auto color_format = instance.GetSupportedFormat(format,
-+                                                              Instance::kColorImageFeatures);
-         if (!instance.IsFormatSupported(color_format,
-                                         vk::FormatFeatureFlagBits2::eColorAttachment)) {
-             LOG_WARNING(Render_Vulkan,
---- a/src/video_core/renderer_vulkan/vk_presenter.h
-+++ b/src/video_core/renderer_vulkan/vk_presenter.h
-@@ -30,6 +30,11 @@
-     VmaAllocation allocation;
-     vk::Image image;
-     vk::ImageView image_view;
-+    // GameBox v7/v8: UI sampling view — the swapchain (UNORM) format while
-+    // image_view uses the (optional, env-selected) sRGB sibling for the
-+    // post-process attachment. With GAMEBOX_OUTPUT_SRGB unset both views
-+    // alias the same encoding (stock identity chain).
-+    vk::ImageView ui_view;
-     vk::Fence present_done;
-     vk::Semaphore ready_semaphore;
-     u64 ready_tick;
+diff --git a/src/video_core/renderer_vulkan/vk_presenter.cpp b/src/video_core/renderer_vulkan/vk_presenter.cpp
+index 17a5a43..8065547 100644
 --- a/src/video_core/renderer_vulkan/vk_presenter.cpp
 +++ b/src/video_core/renderer_vulkan/vk_presenter.cpp
-@@ -496,7 +496,11 @@
+@@ -496,7 +496,11 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
          static_cast<float>(EmulatorSettings.GetRcasAttenuation() / 1000.f);
  
      fsr_pass.Create(device, instance.GetAllocator(), num_images);
@@ -248,7 +252,7 @@
  
      ImGui::Layer::AddLayer(Common::Singleton<Core::Devtools::Layer>::Instance());
      ImGui::Friends::Register();
-@@ -521,6 +524,7 @@
+@@ -521,6 +525,7 @@ Presenter::~Presenter() {
      for (auto& frame : present_frames) {
          vmaDestroyImage(instance.GetAllocator(), frame.image, frame.allocation);
          device.destroyImageView(frame.image_view);
@@ -256,16 +260,13 @@
          device.destroyFence(frame.present_done);
      }
  }
-@@ -537,15 +541,24 @@
-     if (frame->image_view) {
-         device.destroyImageView(frame->image_view);
+@@ -540,12 +545,21 @@ void Presenter::RecreateFrame(Frame* frame, u32 width, u32 height) {
+     if (frame->image) {
+         vmaDestroyImage(instance.GetAllocator(), frame->image, frame->allocation);
      }
 +    if (frame->ui_view) {
 +        device.destroyImageView(frame->ui_view);
 +    }
-     if (frame->image) {
-         vmaDestroyImage(instance.GetAllocator(), frame->image, frame.allocation);
-     }
  
      const vk::Format format = swapchain.GetSurfaceFormat().format;
 +    // GameBox v8: the frame image format comes from the env-tunable selector.
@@ -282,7 +283,7 @@
          .extent = {width, height, 1},
          .mipLevels = 1,
          .arrayLayers = 1,
-@@ -579,7 +590,7 @@
+@@ -579,7 +593,7 @@ void Presenter::RecreateFrame(Frame* frame, u32 width, u32 height) {
      const vk::ImageViewCreateInfo view_info = {
          .image = frame->image,
          .viewType = vk::ImageViewType::e2D,
@@ -291,7 +292,7 @@
          .subresourceRange{
              .aspectMask = vk::ImageAspectFlagBits::eColor,
              .baseMipLevel = 0,
-@@ -590,9 +601,26 @@
+@@ -590,10 +604,27 @@ void Presenter::RecreateFrame(Frame* frame, u32 width, u32 height) {
      };
      auto view = Check<"create frame image view">(device.createImageView(view_info));
      frame->image_view = view;
@@ -319,9 +320,28 @@
 +        ImGui::Vulkan::AddTexture(frame->ui_view, vk::ImageLayout::eShaderReadOnlyOptimal);
      frame->is_hdr = swapchain.GetHDR();
  }
+ 
+diff --git a/src/video_core/renderer_vulkan/vk_presenter.h b/src/video_core/renderer_vulkan/vk_presenter.h
+index 614b9b7..50ba24b 100644
+--- a/src/video_core/renderer_vulkan/vk_presenter.h
++++ b/src/video_core/renderer_vulkan/vk_presenter.h
+@@ -30,6 +30,11 @@ struct Frame {
+     VmaAllocation allocation;
+     vk::Image image;
+     vk::ImageView image_view;
++    // GameBox v7/v8: UI sampling view — the swapchain (UNORM) format while
++    // image_view uses the (optional, env-selected) sRGB sibling for the
++    // post-process attachment. With GAMEBOX_OUTPUT_SRGB unset both views
++    // alias the same encoding (stock identity chain).
++    vk::ImageView ui_view;
+     vk::Fence present_done;
+     vk::Semaphore ready_semaphore;
+     u64 ready_tick;
+diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+index ab495b7..eb0d42f 100644
 --- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
 +++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
-@@ -1383,6 +1383,20 @@
+@@ -1383,6 +1383,20 @@ void Rasterizer::UpdateDepthStencilState() const {
      const auto depth_bias_enabled = regs.polygon_control.NeedsBias();
      dynamic_state.SetDepthBiasEnabled(depth_bias_enabled);
      if (depth_bias_enabled) {
