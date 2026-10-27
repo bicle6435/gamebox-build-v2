@@ -1,4 +1,28 @@
-# GameBox v7.0 — shadPS4 渲染修复增强补丁 v2~v7 引擎 CI 云端构建（v7.0）
+# GameBox v8.1 — shadPS4 渲染修复补丁 v2~v8.1 引擎 CI 云端构建（修复包2 · 含 MD5 预检）
+
+#
+# ============================================================
+# v8.1（2026-10-27 修复包2）：CI 红灯根因修复 + 补丁版本预检
+#
+# 红灯复盘（2026-10-27 13:23 那次运行）：
+#   v2~v6 六个补丁全部应用成功，唯独卡在 v8——因为你仓库里的
+#   shadps4-gamebox-v8-render-brightness.patch 还是 10-26 15:46
+#   上传的作废版（16,600B，MD5 41cde9b9…）。workflow、源码、
+#   v2~v6 补丁全都是新的，唯独这个文件没换成权威版——
+#   《先看我-修正说明.txt》预警过的事，这次真的发生了。
+#
+# 本版变化：
+#   1. v8 补丁升级为 v8.1（17,956B，MD5 fc4345a4…）：
+#      在权威版基础上给 vk_instance.h 显式 #include <cstdlib>。
+#      原因：补丁里 GAMEBOX_OUTPUT_SRGB 开关用 ::getenv 读环境变量，
+#      实测 <span>/<unordered_map> 头文件链并不提供 getenv 声明，
+#      "靠别的头捎带上"是 v7.0 式的翻车隐患——显式包含一劳永逸。
+#   2. workflow 新增「MD5 预检」：开工 30 秒内核对 8 个补丁文件的
+#      版本指纹，版本不对立刻大声报错并给出替换指引——不用再等
+#      50 分钟编译才发现文件传错了。
+#   3. 验收：v2→v3→v4→v5→v6→v8.1 已在你仓库的真实源码 + 真实补丁
+#      上全链重放，22 项验收全绿（21 个标记 grep + getenv 编译实测）。
+# ============================================================
 #
 # ─────────────────────────────────────────────────────────────────────
 # v7.0 新增（2026-10-07）：三项渲染问题引擎侧根治（误报根治在前端完整包）
@@ -280,6 +304,47 @@ jobs:
           }
           Write-Host '[OK] 文件结构正确'
 
+      - name: 补丁文件 MD5 预检（v8.1 新增：30 秒内识别补丁版本不对，不再等 50 分钟后的谜语报错）
+        shell: bash
+        run: |
+          set -e
+          pdir="$GITHUB_WORKSPACE/engine/patches"
+          check_md5() {
+            local f="$1" want="$2" got
+            if [ ! -f "$pdir/$f" ]; then
+              echo "[缺] engine/patches/$f 不存在——把修复包2里的同名文件补传上来"
+              exit 1
+            fi
+            got=$(md5sum "$pdir/$f" | awk '{print $1}')
+            if [ "$got" = "$want" ]; then
+              echo "[OK] $f  $got"
+              return 0
+            fi
+            echo ""
+            echo "=================================================================="
+            echo "[红] 补丁版本不对（v8.1 预检拦截，这不用等编译就定位了）"
+            echo "  文件     : engine/patches/$f"
+            echo "  期望 MD5 : $want"
+            echo "  实际 MD5 : $got"
+            echo "  解法     : 打开网盘里的《GameBox-v8.0-引擎云编译修复包2.zip》，"
+            echo "             用里面的同名文件，在 GitHub 仓库用"
+            echo "             Add file → Upload files 拖拽方式覆盖上传到"
+            echo "             engine/patches/ 文件夹（不要用 Create new file"
+            echo "             网页编辑器粘贴——会改行尾，MD5 就对不上了），"
+            echo "             然后重新 Run workflow。"
+            echo "=================================================================="
+            exit 1
+          }
+          check_md5 shadps4-gamebox-v2-combined.patch 07855b942e8faa9082b789b292107c33
+          check_md5 shadps4-gamebox-v3-occlusion-query.patch 0761a3e9b7a37ebca6dba048cb53da4d
+          check_md5 shadps4-gamebox-v4-vulkan-defaults.patch 78dcf88caf30619f5190146bb2cdb3bb
+          check_md5 shadps4-gamebox-v5-gpu-select.patch c4ce19dac807e7cf0a49f278485b59e7
+          check_md5 shadps4-gamebox-v6-cache-safety.patch 2cae1647b6cb2f8f61ac597476e0f9cf
+          check_md5 shadps4-gamebox-v8-render-brightness.patch fc4345a4abd2407207a2af938c142436
+          check_md5 ffmpeg-cmake-sha-override.patch 1be5d3f0eb93f9a025dc901387479654
+          check_md5 imguifiledialog-childflags-compat.patch 6f59c93da0032bcd9edb9f090c2cd098
+          echo "[OK] 8 个补丁文件全部为权威版，开始干活"
+
       - name: 合并源码分卷（如有）
         shell: pwsh
         run: |
@@ -304,7 +369,7 @@ jobs:
           if (-not (Test-Path 'src\shadps4-sifac4k-main\CMakeLists.txt')) { throw '解压后未找到 src\shadps4-sifac4k-main\CMakeLists.txt（源码包不完整）' }
           Write-Host '[OK] 源码解压完成'
 
-      - name: 应用渲染修复主补丁（v2+v3+v4+v5+v6+v7，v2.1 防弹应用）
+      - name: 应用渲染修复主补丁（v2+v3+v4+v5+v6+v8.1，v2.1 防弹应用 + v8.1 MD5 预检前置）
         shell: bash
         run: |
           set -e
@@ -359,7 +424,7 @@ jobs:
           grep -q 'Duplicate compute pipeline entry' src/video_core/renderer_vulkan/vk_pipeline_serialization.cpp || { echo '[失败] 标记缺失: v6 计算管线重复跳过'; exit 1; }
           echo "[OK] v6 管线缓存防崩补丁应用成功（0x80000003 根治：缓存重复条目优雅跳过）"
 
-          # ---- v7.0：三项渲染问题根治（格式回退阶梯 / 管线一致性 / sRGB 输出链）----
+          # ---- v8.1：渲染返工（格式阶梯与偏移诊断保留；sRGB 直通撤销为 GAMEBOX_OUTPUT_SRGB 可选开关；cstdlib 显式包含）----
           apply_patch "$GITHUB_WORKSPACE/engine/patches/shadps4-gamebox-v8-render-brightness.patch"
           grep -q 'Host format fallback' src/video_core/renderer_vulkan/vk_instance.cpp || { echo '[失败] 标记缺失: v7 格式回退阶梯'; exit 1; }
           grep -q 'kDepthImageFeatures' src/video_core/renderer_vulkan/vk_instance.h || { echo '[失败] 标记缺失: v7 特性集常量'; exit 1; }
@@ -367,7 +432,7 @@ jobs:
           grep -q 'GetFrameAttachmentFormat' src/video_core/renderer_vulkan/vk_presenter.cpp || { echo '[失败] 标记缺失: v7 sRGB 输出链'; exit 1; }
           grep -q 'ui_view' src/video_core/renderer_vulkan/vk_presenter.h || { echo '[失败] 标记缺失: v7 UI 视图'; exit 1; }
           grep -q 'Polygon offset in use' src/video_core/renderer_vulkan/vk_rasterizer.cpp || { echo '[失败] 标记缺失: v7 偏移诊断'; exit 1; }
-          echo "[OK] v7 渲染根治补丁应用成功（D16S8 回退阶梯 + 管线格式一致性 + sRGB 输出链 + 偏移诊断）"
+          echo "[OK] v8.1 渲染返工补丁应用成功（D16S8 回退阶梯 + 管线格式一致性 + sRGB 输出改为可选开关 + 偏移诊断 + cstdlib 显式包含）"
 
       - name: 恢复子模块并锁定版本（45 + 4 嵌套，v2.3 锁定版）
         shell: bash
